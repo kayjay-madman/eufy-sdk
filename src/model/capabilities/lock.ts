@@ -1,4 +1,4 @@
-import { isClassicWifiLock, isFamiLockS3, isSmartLockC33, isVideoSmartLock } from "../device-family.js";
+import { isClassicWifiLock, isFamiLockS3, isSmartLockC30, isSmartLockC33, isVideoSmartLock } from "../device-family.js";
 import { asBool } from "../../core/util.js";
 import { posixWallClockToEpoch, type WallClockTime } from "../../core/posix-tz.js";
 import { LockPushEvent } from "../push-events.js";
@@ -164,16 +164,16 @@ function nativeReport(signal: InboundSignal): Record<string, unknown> | undefine
 }
 
 /**
- * The keypad-user wire on the Smart Lock C33, as the vendor app drives it: the `ff09` opcode that adds a
- * code, and the envelope `apiCommand` the app sends every command to the lock under.
+ * The keypad-user wire on the Smart Lock C33 and C30, as the vendor app drives it: the `ff09` opcode that
+ * adds a code, and the envelope `apiCommand` the app sends every command to these locks under.
  */
 const PASSCODE_WIRE = { ADD: 0x24, API_COMMAND: 6012 } as const;
 
 /** The most bytes one field of an `ff09` frame carries: a field's length is a single byte. */
 const MAX_FIELD_BYTES = 0xff;
 
-/** The models whose keypad users are added here: the Smart Lock C33. */
-const keepsKeypadUsers = (ctx: CommandContext): boolean => isSmartLockC33(ctx);
+/** The models whose keypad users are added here: Smart Lock C33 and C30. */
+const keepsKeypadUsers = (ctx: CommandContext): boolean => isSmartLockC33(ctx) || isSmartLockC30(ctx);
 
 /**
  * When a keypad code admits its holder, on the lock's own clock; a code added without one is permanent.
@@ -285,7 +285,7 @@ const UNBOUNDED_SCHEDULE = JSON.stringify({
 const hhmm = (t: WallClockTime) => `${String(t.hour).padStart(2, "0")}:${String(t.minute).padStart(2, "0")}`;
 
 /**
- * A code's schedule as the cloud record of a Smart Lock C33 stores it, as the app records it. A
+ * A code's schedule as the cloud record of a Smart Lock C33 or C30 stores it, as the app records it. A
  * Time Span carries its first day's midnight and its last day's last second as instants on the lock's
  * clock `tz`, and one time period, `periodic` 255 with its two times as `HH:MM`. A permanent code
  * carries {@link UNBOUNDED_SCHEDULE}. Throws on a lock clock `tz` this cannot evaluate.
@@ -317,7 +317,7 @@ function windowOf(validity: PasscodeValidity | undefined): PasscodeWindow {
  * The fields of the add-passcode frame after its time and account id (`A3`…`AD`): the code as ASCII
  * digits, user type `4` (a keypad user), the window's dates, weekdays and times, the single-use field `0`,
  * the name, the user's short id as two bytes, and the window's validity. Byte-for-byte the frame the app
- * sends to add a code to a C33.
+ * sends to add a code to a C33 or a C30.
  */
 function passcodeFields(passcode: string, name: string, shortUserId: string, window: PasscodeWindow): Buffer[] {
   return [
@@ -640,7 +640,7 @@ export const LOCK_MEMBERS = {
   /**
    * Add a keypad code for a new user named `name` (see {@link addPasscode}): permanent, or within the time
    * span `validity` gives. Answers the user's short id and the code's password id, both as the
-   * 4-hex-digit strings the cloud's user list carries. Smart Lock C33, where both kinds are confirmed.
+   * 4-hex-digit strings the cloud's user list carries. Smart Lock C33 and C30, both kinds confirmed on each.
    */
   addPasscode: provided(
     "deviceUsers",

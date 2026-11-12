@@ -22,6 +22,9 @@ const c33: CommandContext = {
   hasP2p: false,
 };
 
+/** The Smart Lock C30, which the app sends the same add-passcode frame over the same wire. */
+const c30: CommandContext = { ...c33, deviceType: 202, model: "T85D0", serial: "T85D0K0000000000" };
+
 /** A video smart lock on another wire family; the passcode frame is unconfirmed there. */
 const videoLock: CommandContext = { ...c33, deviceType: 189, model: "T8531", serial: "T8531K0000000000" };
 
@@ -53,7 +56,7 @@ function fakes(answer: Ff09Reply = reply(0, [[0xa1, "0007"]])) {
 const lockOf = (ctx: CommandContext, deps: { users?: DeviceUserDirectory; ff09Settings?: Ff09SettingsReader }) =>
   bind<LockActions>("lock", ctx, { deviceUsers: deps.users, ff09Settings: deps.ff09Settings }).acts;
 
-describe("lock.addPasscode — Smart Lock C33", () => {
+describe("lock.addPasscode — Smart Lock C33 and C30", () => {
   it("creates the cloud user, sends the lock the permanent code under its short id, then records the password", async () => {
     const { users, ff09Settings, calls } = fakes();
 
@@ -209,11 +212,12 @@ describe("lock.addPasscode — Smart Lock C33", () => {
     }
   });
 
-  it("is present on the C33, absent off it, and without either provider or the exchange", () => {
+  it("is present on the C33 and C30, absent off them, and without either provider or the exchange", () => {
     const { users, ff09Settings } = fakes();
     const { exchange: _dropped, ...noExchange } = ff09Settings;
 
     expect("addPasscode" in lockOf(c33, { users, ff09Settings })).toBe(true);
+    expect("addPasscode" in lockOf(c30, { users, ff09Settings })).toBe(true);
     expect("addPasscode" in lockOf(videoLock, { users, ff09Settings })).toBe(false);
     expect("addPasscode" in lockOf(c33, { ff09Settings })).toBe(false);
     expect("addPasscode" in lockOf(c33, { users })).toBe(false);
