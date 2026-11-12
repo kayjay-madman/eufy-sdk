@@ -190,6 +190,9 @@ export const isSmartDrop = (ctx: FamilyContext): boolean => ctx.deviceType === D
 /** Smart Lock C33 (T85L0), identified by its distinct cloud device type. */
 export const isSmartLockC33 = (ctx: FamilyContext): boolean => ctx.deviceType === DeviceType.LOCK_85L0;
 
+/** Smart Lock C30 (T85D0), identified by its distinct cloud device type. */
+export const isSmartLockC30 = (ctx: FamilyContext): boolean => ctx.deviceType === DeviceType.LOCK_85D0;
+
 /** FamiLock S3 (T85V0), identified by its distinct cloud device type. */
 export const isFamiLockS3 = (ctx: FamilyContext): boolean => ctx.deviceType === DeviceType.LOCK_85V0;
 
