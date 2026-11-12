@@ -119,3 +119,42 @@ describe("MqttCommandRouter.dispatchCommand (ff09-actuate)", () => {
     expect(fakeMqtt.disconnect).toHaveBeenCalledOnce();
   });
 });
+
+describe("MqttCommandRouter ff09 topics — addressed by the record's product number", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /** A C30's record: model `T85D0C`, product number `T85D0` — it answers only on the product number's topics. */
+  it("probes, subscribes and publishes under device_new_pn where the record carries one", async () => {
+    const c30 = {
+      sn: "T85D0K0000000000",
+      category: "eufy_security",
+      model: "T85D0C",
+      raw: { device_new_pn: "T85D0" },
+    } as unknown as EufyDevice;
+    const router = new MqttCommandRouter({
+      mega: {} as any,
+      listDevices: () => [c30],
+      ensureDevices: async () => {},
+      onCommandAck: () => {},
+      onError: () => {},
+    });
+    const fakeMqtt = Object.assign(new EventEmitter(), {
+      id: "client-1",
+      subscribeDevice: vi.fn().mockResolvedValue(undefined),
+      publish: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+    });
+    const ensure = vi
+      .spyOn(router as any, "ensureSecurityMqttFor")
+      .mockResolvedValue({ mqtt: fakeMqtt, instanceIp: "198.51.100.7" });
+
+    const p = router.dispatchCommand(c30.sn, { ...makeRouter().cmd, deviceSn: c30.sn });
+    await vi.advanceTimersByTimeAsync(5000);
+    await p;
+
+    expect((ensure.mock.calls[0]![0] as EufyDevice).model).toBe("T85D0");
+    expect(fakeMqtt.subscribeDevice.mock.calls[0]![0].model).toBe("T85D0");
+    expect(fakeMqtt.publish.mock.calls[0]![0]).toBe(`cmd/eufy_security/T85D0/${c30.sn}/req`);
+  });
+});
