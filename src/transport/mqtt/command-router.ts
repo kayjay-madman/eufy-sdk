@@ -490,7 +490,8 @@ export class MqttCommandRouter {
   }
 
   /**
-   * The `ff09-actuate` intent handler over MQTT — a standalone lock/garage door (T85D0) with no P2P endpoint.
+   * The `ff09-actuate` intent handler over MQTT — a lock the facade routes here: one with no P2P endpoint,
+   * or one that takes its `ff09` frames over MQTT although it has one.
    * Builds the same `ff09` frame the P2P lock uses (`transport/ff09.ts`), wraps it in the MQTT `trans`
    * envelope (`buildFf09Trans`/`buildFf09MqttEnvelope`, this module), discovers which broker instance holds the device's
    * live session (see {@link ensureSecurityMqttFor}), and publishes to `cmd/eufy_security/{pn}/{sn}/req`.
@@ -687,12 +688,11 @@ export class MqttCommandRouter {
   }
 
   /**
-   * **Read the T85D0's current auto-lock settings over MQTT** — the `Ff09SettingsReader` implementation.
+   * **Read a lock's current auto-lock settings over MQTT** — the `Ff09SettingsReader` implementation.
    * A pure GET, no SET: opens its own one-shot MQTT connection (same
    * lifecycle as {@link dispatchFf09Autolock}), reuses {@link fetchFf09SettingsGetReply}, then decrypts
-   * + decodes fields `a1`-`a5` per `transport/ff09.ts`'s response tag map. Live-verified only insofar
-   * as the underlying GET step already is (`setAutoLock`'s own read) — the standalone read path itself
-   * has not been independently exercised against a real device yet.
+   * + decodes fields `a1`-`a5` per `transport/ff09.ts`'s response tag map. Verified on a FamiLock S3,
+   * whose read answered the values the vendor app's own read of it returned.
    */
   async getAutoLockState(sn: string, cmd: { adminUserId: string; deviceSn: string }): Promise<AutoLockSnapshot> {
     const dev = await this.ff09DeviceFor(sn);

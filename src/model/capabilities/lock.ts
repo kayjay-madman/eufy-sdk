@@ -1,4 +1,4 @@
-import { isClassicWifiLock, isVideoSmartLock } from "../device-family.js";
+import { isClassicWifiLock, isFamiLockS3, isVideoSmartLock } from "../device-family.js";
 import { asBool } from "../../core/util.js";
 import { LockPushEvent } from "../push-events.js";
 import { describeDevice } from "./access.js";
@@ -52,6 +52,9 @@ export const LOCK_SETTING_ID = {
  * Classic Wi-Fi lock: `lock()` and `unlock()` are both confirmed on hardware — the bolt moved each way, the
  * device answered result code 0, and the cloud status followed. That device answers every command, so on it
  * the two reject on a refusal or an unanswered command as well as on missing identity.
+ *
+ * FamiLock S3: `lock()` and `unlock()` are both confirmed on hardware with the `ff09` frame — the lock
+ * answered status 0 to each and reported itself unlocked, then locked.
  */
 export type LockActions = Surface<typeof LOCK_MEMBERS>;
 
@@ -159,8 +162,15 @@ function nativeReport(signal: InboundSignal): Record<string, unknown> | undefine
  */
 const speaksFf09Settings = (ctx: CommandContext): boolean => !isClassicWifiLock(ctx);
 
-/** Rain Mode's gate: the P2P video lock, and only a device that takes the `ff09` settings frame. */
-const rainModeAvailable = (ctx: CommandContext): boolean => overP2p(ctx) && speaksFf09Settings(ctx);
+/**
+ * Whether the `ff09` settings writes are offered. Not on the FamiLock S3: it answers the settings GET and
+ * takes lock and unlock, but no settings write has been seen on it.
+ */
+const offersSettingsWrites = (ctx: CommandContext): boolean => !isFamiLockS3(ctx);
+
+/** Rain Mode's gate: the P2P video lock, and only a device that takes the `ff09` settings frame and its writes. */
+const rainModeAvailable = (ctx: CommandContext): boolean =>
+  overP2p(ctx) && speaksFf09Settings(ctx) && offersSettingsWrites(ctx);
 
 /**
  * Every `lock` feature, declared once.
@@ -269,7 +279,7 @@ export const LOCK_MEMBERS = {
         });
       },
     "Read-modify-write the auto-lock setting, preserving the fields it does not change.",
-    (ctx) => !isVideoSmartLock(ctx) && speaksFf09Settings(ctx),
+    (ctx) => !isVideoSmartLock(ctx) && speaksFf09Settings(ctx) && offersSettingsWrites(ctx),
   ),
 
   /**

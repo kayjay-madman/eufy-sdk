@@ -81,6 +81,7 @@ import {
   isNvrDualLensCamera,
   isNvrFullHdCamera,
   isCallDoorbell,
+  isFamiLockS3,
   isHomeBase,
   isNvrT8N00,
   isStation9000,
@@ -1300,7 +1301,8 @@ export class EufyMega extends EventEmitter {
    * drives this device (`claimsDevice`) rather than inferring from the kind; `keyed-payload-actuate` (the
    * classic Wi-Fi lock) is routed the same way, a channel-less actuation claimed by the stack that drives
    * the lock. `registry.require` throws on an unloaded serial, so a routing decision never silently falls
-   * through to the wrong transport.
+   * through to the wrong transport. The FamiLock S3 takes them over secure MQTT although it has a P2P
+   * endpoint: the vendor app sends it lock and unlock there, and its P2P session leaves them unanswered.
    * The `eufy_life` DP writes (smart lights) are secure-MQTT-only. `aiot-dp` routes to either the
    * Anker AIoT MQTT stack or the legacy Tuya REST router depending on the device's category
    * (`eufy_home_tuya` → Tuya, everything else → MQTT). The capability layer emits a single `aiot-dp`
@@ -1318,6 +1320,9 @@ export class EufyMega extends EventEmitter {
       cmd.kind === "keyed-payload-actuate"
     ) {
       const dev = this.registry.require(sn);
+      const raw = (dev.raw ?? {}) as { device_type?: unknown };
+      const deviceType = typeof raw.device_type === "number" ? raw.device_type : undefined;
+      if (isFamiLockS3({ deviceType })) return this.mqtt.dispatchCommand(sn, cmd);
       if (P2PCommandRouter.claimsDevice(dev)) return this.p2p.dispatchCommand(sn, cmd);
       if (MqttCommandRouter.claimsDevice(dev)) return this.mqtt.dispatchCommand(sn, cmd);
       throw new Error(`no transport stack claims device ${sn} for a ${cmd.kind} command`);
@@ -1541,7 +1546,7 @@ export class EufyMega extends EventEmitter {
     const deviceSn = ctx.serial ?? "";
     return {
       getAutoLockState: () =>
-        ctx.hasP2p
+        ctx.hasP2p && !isFamiLockS3(ctx)
           ? this.p2p.getAutoLockState(sn, { adminUserId, deviceSn })
           : this.mqtt.getAutoLockState(sn, { adminUserId, deviceSn }),
     };

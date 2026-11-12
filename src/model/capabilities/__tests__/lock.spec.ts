@@ -1,5 +1,6 @@
 import { LOCK, LOCK_SETTING_ID, type LockActions } from "../lock.js";
 import { isClassicWifiLock } from "../../device-family.js";
+import { DeviceType } from "../../device-types.js";
 import { bind } from "./bind.js";
 import { Device } from "../../device.js";
 import type { CommandContext } from "../types.js";
@@ -49,6 +50,39 @@ const classicCtx: CommandContext = {
   accountName: "someone+tag",
   hasP2p: true,
 };
+
+// The FamiLock S3: a P2P endpoint, resolved as a camera, `lock` by its model name.
+const famiLockCtx: CommandContext = {
+  channel: 0,
+  codec: "camera",
+  deviceType: DeviceType.LOCK_85V0,
+  model: "T85V0",
+  serial: "T85V0K0000000000",
+  paramIds: new Set(),
+  adminUserId: "0000000000000000000000000000000000000000",
+  shortUserId: "0000",
+  accountName: "someone+tag",
+  hasP2p: true,
+};
+
+describe("lock capability — FamiLock S3", () => {
+  it("offers lock, unlock and the auto-lock read, and withholds the settings writes never seen on it", async () => {
+    const ff09Settings = { getAutoLockState: vi.fn() } as unknown as Ff09SettingsReader;
+    const s3 = lockOf(famiLockCtx, ff09Settings);
+    expect(typeof s3.acts.getAutoLockState).toBe("function");
+    expect("setAutoLock" in s3.acts).toBe(false);
+    expect("setRainMode" in s3.acts).toBe(false);
+    await s3.acts.unlock!();
+    await s3.acts.lock!();
+    expect(s3.sent).toMatchObject([
+      { kind: "ff09-actuate", engage: false, shortUserId: "0000", deviceSn: famiLockCtx.serial },
+      { kind: "ff09-actuate", engage: true },
+    ]);
+    const other = lockOf({ ...famiLockCtx, deviceType: DeviceType.LOCK_8531 }, ff09Settings).acts;
+    expect(typeof other.setAutoLock).toBe("function");
+    expect(typeof other.setRainMode).toBe("function");
+  });
+});
 
 describe("lock capability — classic Wi-Fi lock family", () => {
   it("classifies the classic lock as DeviceType 51 in the driven T8520 serial range, and nothing else", () => {

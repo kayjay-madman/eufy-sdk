@@ -181,6 +181,9 @@ export const isTuyaVacuum = (ctx: FamilyContext): boolean => ctx.category === "e
 /** Video Smart Lock S330, identified by its distinct cloud device type. */
 export const isVideoSmartLock = (ctx: FamilyContext): boolean => ctx.deviceType === DeviceType.LOCK_8530;
 
+/** FamiLock S3 (T85V0), identified by its distinct cloud device type. */
+export const isFamiLockS3 = (ctx: FamilyContext): boolean => ctx.deviceType === DeviceType.LOCK_85V0;
+
 /**
  * The classic Wi-Fi smart lock — the unit whose actuation rides a per-command ECDH-wrapped key rather than
  * the shared `ff09` frame: DeviceType 51 with a serial in the `T8520` range whose seventh character is `2`,
