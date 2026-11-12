@@ -70,6 +70,11 @@ describe("native video lock", () => {
     expect(other.setAutoLock).toBeTypeOf("function");
     expect(other.refreshStatus).toBeUndefined();
   });
+  it("reads native status only through a HomeBase, whatever zone a standalone lock reports", () => {
+    const media = { p2pQuery: vi.fn() } as unknown as MediaProvider;
+    const standalone = bind<LockActions>("lock", { ...ctx, homeBaseAttached: false }, { media }).acts;
+    expect(standalone.refreshStatus).toBeUndefined();
+  });
   it.each(["3", "4", "5", undefined, false])("reads status %s without guessing a boolean", async (state) => {
     const query = vi.fn().mockResolvedValue({ code: 0, slState: state });
     const { acts } = bind<LockActions>("lock", ctx, { media: { p2pQuery: query } as unknown as MediaProvider });

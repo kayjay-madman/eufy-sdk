@@ -2513,7 +2513,7 @@ export class EufyMega extends EventEmitter {
         : RTC_CONTROL_REFUSED_KINDS;
     return {
       channel,
-      timezone: recordString(parentRaw ?? {}, "time_zone"),
+      timezone: recordString(parentRaw ?? (rec.parentSn ? {} : raw), "time_zone"),
       codec: resolved.codec,
       deviceType: rec.deviceType,
       model: rec.model,
