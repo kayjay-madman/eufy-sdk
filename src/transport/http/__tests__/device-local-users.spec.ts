@@ -57,4 +57,15 @@ describe("MegaHttpClient device local users", () => {
       password_list: [{ password_id: "0002", password_type: 1, schedule: "{}" }],
     });
   });
+
+  it("removes a user by its short id", async () => {
+    const { mega, securityAppPost } = client(null);
+
+    await mega.deleteDeviceLocalUser(LOCK, "", "0002");
+    expect(securityAppPost).toHaveBeenCalledWith("/v3/app/device/user/delete", {
+      device_sn: LOCK,
+      short_user_ids: ["0002"],
+      station_sn: "",
+    });
+  });
 });

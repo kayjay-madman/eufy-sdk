@@ -22,6 +22,7 @@ function facade() {
     mega: {
       addDeviceLocalUser: (...a: unknown[]) => Promise<unknown>;
       saveDevicePassword: (...a: unknown[]) => Promise<unknown>;
+      deleteDeviceLocalUser: (...a: unknown[]) => Promise<unknown>;
     };
     ff09SettingsReaderFor(sn: string, c: CommandContext): Ff09SettingsReader | undefined;
     deviceUsersFor(sn: string, c: CommandContext): DeviceUserDirectory;
@@ -58,7 +59,7 @@ describe("facade ff09 exchange + device-user wiring", () => {
     expect(add).toHaveBeenCalledWith(SN, "T8030K0000000000", "Guest");
   });
 
-  it("creates users and records passwords under the device's serial and station", async () => {
+  it("creates users, records passwords and removes users under the device's serial and station", async () => {
     const { internals } = facade();
     const add = vi.spyOn(internals.mega, "addDeviceLocalUser").mockResolvedValue({ shortUserId: "0002" });
     const save = vi.spyOn(internals.mega, "saveDevicePassword").mockResolvedValue(undefined);
@@ -68,7 +69,11 @@ describe("facade ff09 exchange + device-user wiring", () => {
     const password = { passwordId: "0002", passwordType: 1, schedule: "{}" };
     await users.savePassword("0002", password);
 
+    const remove = vi.spyOn(internals.mega, "deleteDeviceLocalUser").mockResolvedValue(undefined);
+    await users.deleteUser("0002");
+
     expect(add).toHaveBeenCalledWith(SN, "", "Guest");
     expect(save).toHaveBeenCalledWith(SN, "", "0002", password);
+    expect(remove).toHaveBeenCalledWith(SN, "", "0002");
   });
 });
