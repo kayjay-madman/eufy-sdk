@@ -411,24 +411,12 @@ export interface Ff09QueryFrameInput {
  * {@link buildFf09Frame}, which still keeps A3). See the module doc's "Settings GET/SET" section.
  */
 export function buildFf09QueryFrame(input: Ff09QueryFrameInput): Ff09Frame {
-  const { adminUserId, deviceSn } = input;
-  const { unixTime, keyTime, seqNum } = resolveFf09Identity(
-    adminUserId,
-    deviceSn,
-    input.unixTime,
-    input.nonce,
-    input.seqNum,
-  );
-  const plain = zeroPadToBlock(writeTlv([u32le(unixTime), Buffer.from(adminUserId, "ascii")]));
-  return assembleFf09Frame(
-    LOCK_COMMAND_CODE.GET_SETTINGS,
-    LOCK_API_COMMAND.GET_SETTINGS,
-    plain,
-    adminUserId,
-    deviceSn,
-    keyTime,
-    seqNum,
-  );
+  return buildFf09CommandFrame({
+    ...input,
+    commandCode: LOCK_COMMAND_CODE.GET_SETTINGS,
+    apiCommand: LOCK_API_COMMAND.GET_SETTINGS,
+    fields: [],
+  });
 }
 
 export interface Ff09SettingsFrameInput {
@@ -464,35 +452,21 @@ export interface Ff09SettingsFrameInput {
  * in the client) is expected to pass through values just read from a GET response.
  */
 export function buildFf09SettingsFrame(input: Ff09SettingsFrameInput): Ff09Frame {
-  const { adminUserId, deviceSn, autoLockEnabled, autoLockDelaySeconds, a7, a8 } = input;
-  const { unixTime, keyTime, seqNum } = resolveFf09Identity(
-    adminUserId,
-    deviceSn,
-    input.unixTime,
-    input.nonce,
-    input.seqNum,
-  );
-  const tlvFields = [
-    u32le(unixTime),
-    Buffer.from(adminUserId, "ascii"),
-    Buffer.from([0x00]), // A3 — observed constant, semantics unconfirmed
-    Buffer.from([autoLockEnabled ? 1 : 0]), // A4 — autolock enable (confirmed)
-    u16le(autoLockDelaySeconds), // A5 — autolock delay seconds (confirmed)
-    Buffer.from([0x00]), // A6 — observed constant, semantics unconfirmed
-    u16le(a7), // A7 — passthrough, semantics unconfirmed
-    u16le(a8), // A8 — passthrough, semantics unconfirmed
-    Buffer.from([0x00]), // A9 — observed constant, semantics unconfirmed
-  ];
-  const plain = zeroPadToBlock(writeTlv(tlvFields));
-  return assembleFf09Frame(
-    LOCK_COMMAND_CODE.SET_SETTINGS,
-    LOCK_API_COMMAND.SET_SETTINGS,
-    plain,
-    adminUserId,
-    deviceSn,
-    keyTime,
-    seqNum,
-  );
+  const { autoLockEnabled, autoLockDelaySeconds, a7, a8, ...rest } = input;
+  return buildFf09CommandFrame({
+    ...rest,
+    commandCode: LOCK_COMMAND_CODE.SET_SETTINGS,
+    apiCommand: LOCK_API_COMMAND.SET_SETTINGS,
+    fields: [
+      Buffer.from([0x00]), // A3 — observed constant, semantics unconfirmed
+      Buffer.from([autoLockEnabled ? 1 : 0]), // A4 — autolock enable (confirmed)
+      u16le(autoLockDelaySeconds), // A5 — autolock delay seconds (confirmed)
+      Buffer.from([0x00]), // A6 — observed constant, semantics unconfirmed
+      u16le(a7), // A7 — passthrough, semantics unconfirmed
+      u16le(a8), // A8 — passthrough, semantics unconfirmed
+      Buffer.from([0x00]), // A9 — observed constant, semantics unconfirmed
+    ],
+  });
 }
 
 /**
@@ -554,31 +528,13 @@ export interface Ff09SettingToggleFrameInput {
  * change. See the module doc's "Rain Mode" section + {@link FF09_SETTING_ID}.
  */
 export function buildFf09SettingToggleFrame(input: Ff09SettingToggleFrameInput): Ff09Frame {
-  const { adminUserId, deviceSn, settingId, value } = input;
-  const { unixTime, keyTime, seqNum } = resolveFf09Identity(
-    adminUserId,
-    deviceSn,
-    input.unixTime,
-    input.nonce,
-    input.seqNum,
-  );
-  const plain = zeroPadToBlock(
-    writeTlv([
-      u32le(unixTime),
-      Buffer.from(adminUserId, "ascii"),
-      Buffer.from([settingId & 0xff]),
-      Buffer.from([value ? 1 : 0]),
-    ]),
-  );
-  return assembleFf09Frame(
-    LOCK_COMMAND_CODE.SET_SETTINGS,
-    LOCK_API_COMMAND.SET_SETTINGS,
-    plain,
-    adminUserId,
-    deviceSn,
-    keyTime,
-    seqNum,
-  );
+  const { settingId, value, ...rest } = input;
+  return buildFf09CommandFrame({
+    ...rest,
+    commandCode: LOCK_COMMAND_CODE.SET_SETTINGS,
+    apiCommand: LOCK_API_COMMAND.SET_SETTINGS,
+    fields: [Buffer.from([settingId & 0xff]), Buffer.from([value ? 1 : 0])],
+  });
 }
 
 export interface Ff09CommandFrameInput {
