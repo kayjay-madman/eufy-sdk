@@ -53,6 +53,9 @@ export const LOCK_SETTING_ID = {
  * Classic Wi-Fi lock: `lock()` and `unlock()` are both confirmed on hardware — the bolt moved each way, the
  * device answered result code 0, and the cloud status followed. That device answers every command, so on it
  * the two reject on a refusal or an unanswered command as well as on missing identity.
+ *
+ * FamiLock S3: `lock()` and `unlock()` are both confirmed on hardware with the `ff09` frame — the lock
+ * answered status 0 to each and reported itself unlocked, then locked.
  */
 export type LockActions = Surface<typeof LOCK_MEMBERS>;
 

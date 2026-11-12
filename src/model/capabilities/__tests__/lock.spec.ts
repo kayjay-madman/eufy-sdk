@@ -53,6 +53,34 @@ const classicCtx: CommandContext = {
   hasP2p: true,
 };
 
+// The FamiLock S3: a P2P endpoint, resolved as a camera.
+const famiLockCtx: CommandContext = {
+  channel: 0,
+  codec: "camera",
+  deviceType: DeviceType.LOCK_85V0,
+  model: "T85V0",
+  serial: "T85V0K0000000000",
+  paramIds: new Set(),
+  adminUserId: "0000000000000000000000000000000000000000",
+  shortUserId: "0000",
+  accountName: "someone+tag",
+  hasP2p: true,
+};
+
+describe("lock capability — FamiLock S3", () => {
+  it("offers lock, unlock and the auto-lock read", async () => {
+    const ff09Settings = { getAutoLockState: vi.fn() } as unknown as Ff09SettingsReader;
+    const s3 = lockOf(famiLockCtx, ff09Settings);
+    expect(typeof s3.acts.getAutoLockState).toBe("function");
+    await s3.acts.unlock!();
+    await s3.acts.lock!();
+    expect(s3.sent).toMatchObject([
+      { kind: "ff09-actuate", engage: false, shortUserId: "0000", deviceSn: famiLockCtx.serial },
+      { kind: "ff09-actuate", engage: true },
+    ]);
+  });
+});
+
 describe("lock capability — classic Wi-Fi lock family", () => {
   it("classifies the classic lock as DeviceType 51 in the driven T8520 serial range, and nothing else", () => {
     expect(isClassicWifiLock(classicCtx)).toBe(true);

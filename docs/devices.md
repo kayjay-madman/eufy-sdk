@@ -71,7 +71,8 @@ permanent-outdoor-light line: on/off/brightness/custom colour/effect — see the
 `ptz` (rotate + left/right/up/down, zoom, and a `preset()` sub-API — see the [PTZ guide](/ptz)), plus
 `arming`, `lock` (lock/unlock/setAutoLock on both the P2P video lock and the MQTT garage door; lock/unlock
 also on the classic Wi-Fi lock over its own keyed envelope, both directions hardware-confirmed, where
-`setAutoLock` is absent — optional accessor, `?.()`; plus setRainMode on the video lock only; `unlock()` alone
+`setAutoLock` is absent — optional accessor, `?.()`; lock/unlock and getAutoLockState on the FamiLock S3
+over secure MQTT, both directions hardware-confirmed; plus setRainMode on the video lock only; `unlock()` alone
 opens a standalone SmartDrop lid), and `siren` (volume, alarm duration, and test/stop triggers — see below).
 
 > **Unverified writes are absent, they don't guess.** A write method present on a `dev.<cap>()` object
