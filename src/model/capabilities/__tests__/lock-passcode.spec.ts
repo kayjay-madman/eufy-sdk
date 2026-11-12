@@ -52,6 +52,9 @@ function fakes(answer: Ff09Reply = reply(0, [[0xa1, "0007"]])) {
     savePassword: vi.fn(async () => {
       calls.push("savePassword");
     }),
+    deleteUser: vi.fn(async () => {
+      calls.push("deleteUser");
+    }),
   };
   const ff09Settings: Ff09SettingsReader = {
     getAutoLockState: vi.fn(),
@@ -119,6 +122,7 @@ describe("lock.addPasscode — Smart Lock C33, C30 and FamiLock S3", () => {
     await expect(lockOf(c33, { users, ff09Settings }).addPasscode!("Guest", "13572468")).rejects.toThrow(
       "no reply (cloud user 0007 remains)",
     );
+    expect(users.deleteUser).not.toHaveBeenCalled();
   });
 
   it("names the stored code when the cloud does not record it", async () => {
@@ -281,6 +285,44 @@ describe("lock.addPasscode — Smart Lock C33, C30 and FamiLock S3", () => {
   });
 });
 
+describe("lock.deleteUser", () => {
+  it("tells the lock to delete the user under its short id, then removes the cloud user", async () => {
+    const { users, ff09Settings, calls } = fakes(reply(0));
+
+    await lockOf(c33, { users, ff09Settings }).deleteUser!("0007");
+
+    expect(calls).toEqual(["exchange", "deleteUser"]);
+    const [code, apiCommand, fields] = vi.mocked(ff09Settings.exchange!).mock.calls[0]!;
+    expect([code, apiCommand]).toEqual([0x2d, 6012]);
+    expect(fields.map((f) => f.toString("hex"))).toEqual(["0007"]);
+    expect(users.deleteUser).toHaveBeenCalledWith("0007");
+  });
+
+  it("rejects with the lock's status on a refusal, leaving the cloud user", async () => {
+    const { users, ff09Settings } = fakes(reply(1));
+
+    await expect(lockOf(c33, { users, ff09Settings }).deleteUser!("0007")).rejects.toThrow(/device result 1/);
+    expect(users.deleteUser).not.toHaveBeenCalled();
+  });
+
+  it("refuses a malformed short id and the account's own before touching the lock", async () => {
+    const { users, ff09Settings } = fakes(reply(0));
+    const lock = lockOf(c33, { users, ff09Settings });
+
+    await expect(lock.deleteUser!("7")).rejects.toThrow(/4 hex digits/);
+    await expect(lock.deleteUser!("0000")).rejects.toThrow(/account's own user/);
+    expect(ff09Settings.exchange).not.toHaveBeenCalled();
+  });
+
+  it("is present where addPasscode is, and absent off those models", () => {
+    const { users, ff09Settings } = fakes();
+
+    for (const ctx of [c33, c30, s3]) expect("deleteUser" in lockOf(ctx, { users, ff09Settings })).toBe(true);
+    expect("deleteUser" in lockOf(videoLock, { users, ff09Settings })).toBe(false);
+    expect("deleteUser" in lockOf(c33, { ff09Settings })).toBe(false);
+  });
+});
+
 type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 declare const lk: LockActions;
 const _optional: Exact<undefined extends typeof lk.addPasscode ? true : false, true> = true;
@@ -288,4 +330,5 @@ const _signature: Exact<
   NonNullable<typeof lk.addPasscode>,
   (name: string, passcode: string, validity?: PasscodeValidity) => Promise<{ shortUserId: string; passwordId: string }>
 > = true;
-export const _surfaceAssertions = [_optional, _signature];
+const _deleteSignature: Exact<NonNullable<typeof lk.deleteUser>, (shortUserId: string) => Promise<void>> = true;
+export const _surfaceAssertions = [_optional, _signature, _deleteSignature];

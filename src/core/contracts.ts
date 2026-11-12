@@ -1160,6 +1160,8 @@ export interface DeviceUserDirectory {
    * `schedule` as the opaque string it is given, and lists the password under the user once recorded.
    */
   savePassword(shortUserId: string, password: DeviceUserPassword): Promise<void>;
+  /** Remove the local user `shortUserId`'s record, and the passwords recorded under it. */
+  deleteUser(shortUserId: string): Promise<void>;
 }
 
 /** One password as the cloud records it under a device's local user. */
