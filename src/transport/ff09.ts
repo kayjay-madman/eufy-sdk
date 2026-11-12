@@ -145,7 +145,7 @@
 
 import { createCipheriv, createDecipheriv } from "node:crypto";
 import { u16be, u16le, u32be, u32le } from "../core/util.js";
-import type { AutoLockSnapshot } from "../core/contracts.js";
+import type { AutoLockSnapshot, Ff09Reply } from "../core/contracts.js";
 
 /**
  * `apiCommand` values for the `TRANSFER_PAYLOAD` (1940) envelope `payload`. `ON_OFF_LOCK` (6018)
@@ -581,6 +581,54 @@ export function buildFf09SettingToggleFrame(input: Ff09SettingToggleFrameInput):
   );
 }
 
+export interface Ff09CommandFrameInput {
+  /** The frame opcode, encoded into `cmdEnc` as `0x4000 | commandCode`. */
+  commandCode: number;
+  /** The `apiCommand` the envelope carries beside the frame. */
+  apiCommand: number;
+  /** The lock owner's account id (`member.admin_user_id`, 40 hex chars) — drives the key + `A2`. */
+  adminUserId: string;
+  /** The lock's serial number — the AES IV (zero-padded to 16). */
+  deviceSn: string;
+  /** The fields after `A1` time and `A2` account id, tagged `A3` onward in this order. */
+  fields: readonly Buffer[];
+  /** Override the unix-seconds stamp (testing / byte-exact reproduction). Default = now. */
+  unixTime?: number;
+  /** Override the key-time nonce OR'd into `unixTime` (testing). Default = a random 0..99. */
+  nonce?: number;
+  /** Override the envelope `seq_num` (testing). Default = `unixTime`. */
+  seqNum?: number;
+}
+
+/**
+ * Build an `ff09` frame for any opcode: `[A1 time][A2 adminUserId]` followed by the caller's fields,
+ * under the same identity checks, padding and cipher as every other builder here. The opcode and the
+ * fields' meaning are the caller's; this owns only the framing.
+ */
+export function buildFf09CommandFrame(input: Ff09CommandFrameInput): Ff09Frame {
+  const { adminUserId, deviceSn } = input;
+  const { unixTime, keyTime, seqNum } = resolveFf09Identity(
+    adminUserId,
+    deviceSn,
+    input.unixTime,
+    input.nonce,
+    input.seqNum,
+  );
+  const plain = zeroPadToBlock(writeTlv([u32le(unixTime), Buffer.from(adminUserId, "ascii"), ...input.fields]));
+  return assembleFf09Frame(input.commandCode, input.apiCommand, plain, adminUserId, deviceSn, keyTime, seqNum);
+}
+
+/**
+ * The opcode an `ff09` frame carries: `cmdEnc` with its flag bits cleared. A reply carries its request's
+ * opcode under flags of its own (`0x4835` answers `0x4035`), so the two compare equal here. `undefined`
+ * for a payload that is not an `ff09` frame.
+ */
+export function ff09FrameCode(lockPayload: string): number | undefined {
+  const buf = Buffer.from(lockPayload, "hex");
+  if (buf.length < 9 || buf[0] !== 0xff || buf[1] !== 0x09) return undefined;
+  return buf.readUInt16BE(7) & 0x3ff;
+}
+
 /**
  * Decrypt any `ff09` response frame (e.g. the GET-settings reply) back to its plaintext TLV bytes.
  * Same key/iv derivation as the encoder (`adminUserId.slice(-12) ‖ u32be(keyTime)` / `deviceSn` padded
@@ -624,22 +672,13 @@ export function decryptFf09Frame(input: {
   return Buffer.concat([decipher.update(ct), decipher.final()]);
 }
 
-/** A decoded settings-response TLV: the leading status byte + the `a1..ad` fields, keyed by separator byte. */
-export interface Ff09SettingsResponse {
-  /** The leading status byte (byte 0 of the decrypted plaintext, before the TLV fields). */
-  status: number;
-  /** `sep` (e.g. `0xa2`) → field bytes. The response's own tag numbering — does NOT line up positionally
-   * with the GET/SET request TLVs (see the module doc). */
-  fields: Map<number, Buffer>;
-}
-
 /**
  * Parse a decrypted settings-response plaintext ({@link decryptFf09Frame}'s output) into its leading
  * status byte + `sep|len|bytes` TLV fields. Stops at a `0x00` separator (real tags start at `0xa1`;
  * a `0x00` sep only ever shows up as trailing zero-padding, never a real field) so it doesn't choke on
  * padding past the last real field.
  */
-export function parseFf09SettingsResponse(plain: Buffer): Ff09SettingsResponse {
+export function parseFf09SettingsResponse(plain: Buffer): Ff09Reply {
   if (plain.length < 1) throw new Error("ff09: settings response too short (missing status byte)");
   const status = plain[0]!;
   const fields = walkFf09Tlv(plain, 1, plain.length);
@@ -695,7 +734,7 @@ export function readFf09HourMinute(field: Buffer | undefined, name: string): [nu
  * `a4`/`a5`=schedule start/end (`[hour,minute]`). Shared here (rather than copied into each router's
  * `getAutoLockState`) so the P2P and MQTT read paths can't drift on the field mapping.
  */
-export function decodeFf09AutoLockSnapshot(parsed: Ff09SettingsResponse): AutoLockSnapshot {
+export function decodeFf09AutoLockSnapshot(parsed: Ff09Reply): AutoLockSnapshot {
   return {
     enabled: readFf09U8(parsed.fields.get(0xa1), "a1 (enabled)") !== 0,
     delaySeconds: readFf09U16LE(parsed.fields.get(0xa2), "a2 (delaySeconds)"),
