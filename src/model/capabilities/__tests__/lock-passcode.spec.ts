@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import type { LockActions, PasscodeValidity } from "../lock.js";
+import type { Weekday } from "../../weekdays.js";
 import { bind } from "./bind.js";
 import type { CommandContext } from "../types.js";
 import type { DeviceUserDirectory, Ff09Reply, Ff09SettingsReader } from "../../../core/contracts.js";
@@ -225,6 +226,109 @@ describe("lock.addPasscode — Smart Lock C33, C30 and FamiLock S3", () => {
     );
   });
 
+  it("sends a Repeated Entry as the app does: its days, the weekday mask with the top bit, all day", async () => {
+    const { users, ff09Settings } = fakes();
+
+    await lockOf(c33, { users, ff09Settings }).addPasscode!("Guest", "13243546", {
+      kind: "repeated",
+      starts: { year: 2026, month: 11, day: 11 },
+      ends: { year: 2026, month: 12, day: 31 },
+      days: ["monday", "wednesday", "friday"],
+    });
+
+    const fields = vi.mocked(ff09Settings.exchange!).mock.calls[0]![2].map((f) => f.toString("hex"));
+    expect([fields[1], ...fields.slice(2, 8), fields[10]]).toEqual([
+      "04",
+      "ea070b0b",
+      "ea070c1f",
+      "aa",
+      "0000",
+      "ffff",
+      "00",
+      "01",
+    ]);
+    expect(users.savePassword).toHaveBeenCalledWith("0007", {
+      passwordId: "0007",
+      passwordType: 1,
+      schedule: JSON.stringify({
+        startDate: 1794373200,
+        endDate: 1798779599,
+        timePeriodNum: 1,
+        timePeriods: [{ periodic: 170, startTime: "0:0", endTime: "-1:-1" }],
+      }),
+    });
+  });
+
+  it("sends a OneTime code as the app does: user type 5, every weekday with the top bit, single use", async () => {
+    const { users, ff09Settings } = fakes();
+
+    await lockOf(c33, { users, ff09Settings }).addPasscode!("Guest", "24354657", { kind: "oneTime" });
+
+    const fields = vi.mocked(ff09Settings.exchange!).mock.calls[0]![2].map((f) => f.toString("hex"));
+    expect([fields[1], ...fields.slice(2, 8), fields[10]]).toEqual([
+      "05",
+      "00000000",
+      "ffffffff",
+      "ff",
+      "0000",
+      "ffff",
+      "01",
+      "00",
+    ]);
+    expect(vi.mocked(users.savePassword).mock.calls[0]![1].schedule).toBe(
+      JSON.stringify({
+        startDate: 0,
+        endDate: -1,
+        timePeriodNum: 1,
+        timePeriods: [{ periodic: 127, startTime: "0:0", endTime: "-1:-1" }],
+      }),
+    );
+  });
+
+  it("sends an S3 Repeated Entry and records its weekday byte in the S3's cloud form", async () => {
+    const { users, ff09Settings } = fakes();
+
+    await lockOf(s3, { users, ff09Settings }).addPasscode!("Guest", "35465768", {
+      kind: "repeated",
+      starts: { year: 2026, month: 11, day: 12 },
+      ends: { year: 2027, month: 1, day: 15 },
+      days: ["tuesday", "thursday", "saturday"],
+    });
+
+    const fields = vi.mocked(ff09Settings.exchange!).mock.calls[0]![2].map((f) => f.toString("hex"));
+    expect([...fields.slice(2, 8), fields[10]]).toEqual(["ea070b0c", "eb07010f", "d4", "0000", "ffff", "00", "01"]);
+    expect(vi.mocked(users.savePassword).mock.calls[0]![1].schedule).toBe(
+      JSON.stringify({ startDay: "EA070B0C", endDay: "EB07010F", week: "D4", startTime: "0000", endTime: "FFFF" }),
+    );
+  });
+
+  it("starts an S3 OneTime code on the lock's own day, as the app does", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-11T03:30:00Z"));
+    try {
+      const { users, ff09Settings } = fakes();
+
+      await lockOf(s3, { users, ff09Settings }).addPasscode!("Guest", "46576879", { kind: "oneTime" });
+
+      const fields = vi.mocked(ff09Settings.exchange!).mock.calls[0]![2].map((f) => f.toString("hex"));
+      expect([fields[1], ...fields.slice(2, 8), fields[10]]).toEqual([
+        "05",
+        "ea070b0a",
+        "ffffffff",
+        "ff",
+        "0000",
+        "ffff",
+        "01",
+        "00",
+      ]);
+      expect(vi.mocked(users.savePassword).mock.calls[0]![1].schedule).toBe(
+        JSON.stringify({ startDay: "EA070B0A", endDay: "FFFFFFFF", week: "FF", startTime: "0000", endTime: "FFFF" }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("adds an S3 time span without the lock's clock zone, which its cloud record does not use", async () => {
     const { users, ff09Settings } = fakes();
     const at = (day: number, hour: number) => ({ year: 2026, month: 11, day, hour, minute: 0 });
@@ -238,6 +342,38 @@ describe("lock.addPasscode — Smart Lock C33, C30 and FamiLock S3", () => {
     expect(vi.mocked(users.savePassword).mock.calls[0]![1].schedule).toBe(
       JSON.stringify({ startDay: "EA070B0A", endDay: "EA070B0B", week: "FF", startTime: "0A00", endTime: "0900" }),
     );
+  });
+
+  it("dates an S3 OneTime code by the lock's day through the hour its clock repeats at midnight", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-04-05T03:30:00Z"));
+    try {
+      const { users, ff09Settings } = fakes();
+      const chile = { ...s3, timezone: "<-04>4<-03>,M9.1.6/24,M4.1.6/24" };
+
+      await lockOf(chile, { users, ff09Settings }).addPasscode!("Guest", "1234", { kind: "oneTime" });
+
+      expect(vi.mocked(ff09Settings.exchange!).mock.calls[0]![2][2]!.toString("hex")).toBe("ea070404");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses a Repeated Entry it cannot spell before touching the cloud", async () => {
+    const day = (d: number, month = 2) => ({ year: 2026, month, day: d });
+    const refusals: Array<[Extract<PasscodeValidity, { kind: "repeated" }>, RegExp]> = [
+      [{ kind: "repeated", starts: day(30), ends: day(5, 3), days: ["monday"] }, /not a real day/],
+      [{ kind: "repeated", starts: day(12), ends: day(10), days: ["monday"] }, /must not end before it starts/],
+      [{ kind: "repeated", starts: day(10), ends: day(12), days: [] }, /at least one weekday/],
+      [{ kind: "repeated", starts: day(10), ends: day(12), days: ["mon" as Weekday] }, /"mon" is not a weekday/],
+    ];
+    for (const [validity, reason] of refusals) {
+      const { users, ff09Settings } = fakes();
+      await expect(lockOf(c33, { users, ff09Settings }).addPasscode!("Guest", "1234", validity)).rejects.toThrow(
+        reason,
+      );
+      expect(users.addUser).not.toHaveBeenCalled();
+    }
   });
 
   it("refuses a time span it cannot spell before touching the cloud", async () => {

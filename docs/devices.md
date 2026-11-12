@@ -293,6 +293,13 @@ await keypad?.addPasscode?.("Stay", "24681357", {
   starts: { year: 2026, month: 11, day: 12, hour: 15, minute: 0 },
   ends: { year: 2026, month: 11, day: 15, hour: 11, minute: 0 },
 });
+await keypad?.addPasscode?.("Cleaner", "35465768", {
+  kind: "repeated", // Schedule → Repeated Entry: chosen weekdays, all day
+  starts: { year: 2026, month: 11, day: 12 },
+  ends: { year: 2027, month: 1, day: 15 },
+  days: ["tuesday", "thursday"],
+});
+await keypad?.addPasscode?.("Courier", "46576879", { kind: "oneTime" }); // admits once
 if (guest) await keypad?.deleteUser?.(guest.shortUserId);
 ```
 

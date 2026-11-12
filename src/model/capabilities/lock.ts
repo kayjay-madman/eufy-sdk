@@ -1,6 +1,7 @@
 import { isClassicWifiLock, isFamiLockS3, isSmartLockC30, isSmartLockC33, isVideoSmartLock } from "../device-family.js";
 import { asBool } from "../../core/util.js";
 import { posixWallClockToEpoch, type WallClockTime } from "../../core/posix-tz.js";
+import { WEEKDAYS, type Weekday } from "../weekdays.js";
 import { LockPushEvent } from "../push-events.js";
 import { describeDevice } from "./access.js";
 import { method, propertiesOf, provided, type MemberDeps, type Members, type Surface } from "./members.js";
@@ -183,22 +184,37 @@ const keepsKeypadUsers = (ctx: CommandContext): boolean =>
  *
  * - `timeSpan` — Schedule → Time Span: one continuous window from `starts` to `ends`, wall times on the
  *   lock's clock to the minute.
+ * - `repeated` — Schedule → Repeated Entry: every listed weekday, all day, from the day `starts` through
+ *   the day `ends`.
+ * - `oneTime` — OneTime: the code admits once.
  */
-export type PasscodeValidity = { kind: "timeSpan"; starts: WallClockTime; ends: WallClockTime };
+export type PasscodeValidity =
+  | { kind: "timeSpan"; starts: WallClockTime; ends: WallClockTime }
+  | {
+      kind: "repeated";
+      starts: Pick<WallClockTime, "year" | "month" | "day">;
+      ends: Pick<WallClockTime, "year" | "month" | "day">;
+      days: readonly Weekday[];
+    }
+  | { kind: "oneTime" };
 
-/** A code's window as the add-passcode frame spells it (`A5`…`A9`, `AD`). */
+/** A code's window as the add-passcode frame spells it (`A4`…`A9`, `AA`, `AD`). */
 interface PasscodeWindow {
+  /** `A4`: `4` for a keypad user, `5` for a OneTime one. */
+  userType: number;
   /** `A5`: the first day, as {@link frameDate}; `00000000` for none. */
   startDate: Buffer;
   /** `A6`: the last day, as {@link frameDate}; `ffffffff` for none. */
   endDate: Buffer;
-  /** `A7`: the weekdays it admits on: `7f` for a permanent code, `ff` for a Time Span. */
+  /** `A7`: the weekdays, a mask in {@link WEEKDAYS} order, its top bit set on all but a permanent code. */
   week: number;
   /** `A8`: the time of day the code opens, `[hour, minute]`. */
   startTime: Buffer;
   /** `A9`: the time of day the code closes, `[hour, minute]`; `ffff` for the end of the day. */
   endTime: Buffer;
-  /** `AD`: `0` for a permanent code, `2` for a Time Span. */
+  /** `AA`: `1` for a code that admits once, `0` otherwise. */
+  singleUse: number;
+  /** `AD`: `0` for a permanent or OneTime code, `1` for a Repeated Entry, `2` for a Time Span. */
   validity: number;
 }
 
@@ -207,13 +223,21 @@ interface PasscodeWindow {
  * `00:00` with no end time (`ffff`), validity `0`.
  */
 const PERMANENT_WINDOW: PasscodeWindow = {
+  userType: 4,
   startDate: Buffer.from([0, 0, 0, 0]),
   endDate: Buffer.from([0xff, 0xff, 0xff, 0xff]),
   week: 0x7f,
   startTime: Buffer.from([0, 0]),
   endTime: Buffer.from([0xff, 0xff]),
+  singleUse: 0,
   validity: 0,
 };
+
+/**
+ * A OneTime code's window, as the app sends it: user type `5`, the permanent code's dates and times,
+ * every weekday with the top bit set (`ff`), the single-use field `1`, validity `0`.
+ */
+const ONE_TIME_WINDOW: PasscodeWindow = { ...PERMANENT_WINDOW, userType: 5, week: 0xff, singleUse: 1 };
 
 /** Whether `t` names a real calendar day the frame can carry (a `u16` year from 2000). */
 function isRealDay(t: Pick<WallClockTime, "year" | "month" | "day">): boolean {
@@ -266,6 +290,31 @@ function timeSpanWindow(span: Extract<PasscodeValidity, { kind: "timeSpan" }>): 
   };
 }
 
+/**
+ * A Repeated Entry's window, as the app sends it: each date as {@link frameDate}, the weekdays as a mask
+ * in {@link WEEKDAYS} order with the top bit set (Monday, Wednesday and Friday are `aa`), all day
+ * (`0000` to `ffff`), validity `1`. Throws on a day that is not real, on an end before its start, and on
+ * no weekday or one not in {@link WEEKDAYS}.
+ */
+function repeatedWindow(span: Extract<PasscodeValidity, { kind: "repeated" }>): PasscodeWindow {
+  const { starts, ends, days } = span;
+  for (const t of [starts, ends]) {
+    if (!isRealDay(t)) throw new Error(`lock.addPasscode: ${JSON.stringify(t)} is not a real day`);
+  }
+  const day = (t: Pick<WallClockTime, "year" | "month" | "day">) => Date.UTC(t.year, t.month - 1, t.day);
+  if (day(ends) < day(starts)) throw new Error("lock.addPasscode: repeated entry must not end before it starts");
+  if (days.length === 0) throw new Error("lock.addPasscode: repeated entry needs at least one weekday");
+  const unknown = days.find((d) => !WEEKDAYS.includes(d));
+  if (unknown !== undefined) throw new Error(`lock.addPasscode: ${JSON.stringify(unknown)} is not a weekday`);
+  return {
+    ...PERMANENT_WINDOW,
+    startDate: frameDate(starts),
+    endDate: frameDate(ends),
+    week: days.reduce((mask, d) => mask | (1 << WEEKDAYS.indexOf(d)), 0x80),
+    validity: 1,
+  };
+}
+
 /** The instant `time` names on the lock's clock `tz`. Throws on a zone this cannot evaluate. */
 function onLockClock(tz: string | undefined, time: WallClockTime): number {
   const at = posixWallClockToEpoch(tz ?? "", time);
@@ -275,7 +324,21 @@ function onLockClock(tz: string | undefined, time: WallClockTime): number {
   return at;
 }
 
-/** The cloud schedule the app records for a code with no dates or times: a permanent one. */
+/**
+ * The calendar day it is now on the lock's clock `tz`: the day whose midnight on that clock is the latest
+ * one not after the present instant. Throws on a zone this cannot evaluate.
+ */
+function lockToday(tz: string | undefined): Pick<WallClockTime, "year" | "month" | "day"> {
+  const now = new Date();
+  for (const offset of [1, 0, -1]) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + offset));
+    const day = { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
+    if (onLockClock(tz, { ...day, hour: 0, minute: 0 }) * 1000 <= now.getTime()) return day;
+  }
+  throw new Error(`lock.addPasscode: no day on the lock's clock ${JSON.stringify(tz)} has begun`);
+}
+
+/** The cloud schedule the app records for a code with no dates or times: permanent, and OneTime. */
 const UNBOUNDED_SCHEDULE = JSON.stringify({
   startDate: 0,
   endDate: -1,
@@ -296,25 +359,30 @@ const hhmm = (t: WallClockTime) => `${String(t.hour).padStart(2, "0")}:${String(
 
 /**
  * A code's schedule as the cloud record of a Smart Lock C33 or C30 stores it, as the app records it. A
- * Time Span carries its first day's midnight and its last day's last second as instants on the lock's
- * clock `tz`, and one time period, `periodic` 255 with its two times as `HH:MM`. A permanent code
- * carries {@link UNBOUNDED_SCHEDULE}. Throws on a lock clock `tz` this cannot evaluate.
+ * dated code carries its first day's midnight and its last day's last second as instants on the lock's
+ * clock `tz`, and one time period: a Time Span's `periodic` 255 and its two times as `HH:MM`, a Repeated
+ * Entry's frame weekday byte and `0:0` to `-1:-1`. A permanent or OneTime code carries
+ * {@link UNBOUNDED_SCHEDULE}. Throws on a lock clock `tz` this cannot evaluate.
  */
-function smartLockSchedule({ validity, tz }: ScheduleSource): string {
-  if (!validity) return UNBOUNDED_SCHEDULE;
+function smartLockSchedule({ window, validity, tz }: ScheduleSource): string {
+  if (validity?.kind !== "timeSpan" && validity?.kind !== "repeated") return UNBOUNDED_SCHEDULE;
   const { starts, ends } = validity;
   return JSON.stringify({
     startDate: onLockClock(tz, { ...starts, hour: 0, minute: 0, second: 0 }),
     endDate: onLockClock(tz, { ...ends, hour: 23, minute: 59, second: 59 }),
     timePeriodNum: 1,
-    timePeriods: [{ periodic: 255, startTime: hhmm(starts), endTime: hhmm(ends) }],
+    timePeriods: [
+      validity.kind === "timeSpan"
+        ? { periodic: 255, startTime: hhmm(validity.starts), endTime: hhmm(validity.ends) }
+        : { periodic: window.week, startTime: "0:0", endTime: "-1:-1" },
+    ],
   });
 }
 
 /**
  * A window as the FamiLock S3's cloud record spells it: the frame's dates, weekday byte and times as
  * upper-case hex, the weekday byte with its top bit set — the app records `FF` for a permanent code,
- * whose frame carries `7f`.
+ * whose frame carries `7f`, and a Repeated Entry's `d4` as `D4`.
  */
 function famiLockSchedule({ window }: ScheduleSource): string {
   const hex = (b: Buffer) => b.toString("hex").toUpperCase();
@@ -331,21 +399,37 @@ function famiLockSchedule({ window }: ScheduleSource): string {
 interface PasscodeDialect {
   /** The schedule the model's cloud record stores for a code, the JSON string verbatim. */
   schedule(code: ScheduleSource): string;
+  /** A OneTime code's window on the lock's clock `tz`. */
+  oneTime(tz: string | undefined): PasscodeWindow;
 }
 
 /** The Smart Lock C33's spelling, which the C30 shares. */
-const SMART_LOCK_DIALECT: PasscodeDialect = { schedule: smartLockSchedule };
+const SMART_LOCK_DIALECT: PasscodeDialect = { schedule: smartLockSchedule, oneTime: () => ONE_TIME_WINDOW };
 
-/** The FamiLock S3's spelling: its cloud record is {@link famiLockSchedule}. */
-const FAMILOCK_DIALECT: PasscodeDialect = { schedule: famiLockSchedule };
+/**
+ * The FamiLock S3's spelling: its cloud record is {@link famiLockSchedule}, and the app starts a OneTime
+ * code on the day it is added, on the lock's clock, where the C33 carries no start date.
+ */
+const FAMILOCK_DIALECT: PasscodeDialect = {
+  schedule: famiLockSchedule,
+  oneTime: (tz) => ({ ...ONE_TIME_WINDOW, startDate: frameDate(lockToday(tz)) }),
+};
 
-/** The window `validity` asks for; permanent without one. Throws on a kind it does not know. */
-function windowOf(validity: PasscodeValidity | undefined): PasscodeWindow {
+/** The window `validity` asks for, in `dialect`; permanent without one. Throws on a kind it does not know. */
+function windowOf(
+  validity: PasscodeValidity | undefined,
+  tz: string | undefined,
+  dialect: PasscodeDialect,
+): PasscodeWindow {
   switch (validity?.kind) {
     case undefined:
       return PERMANENT_WINDOW;
     case "timeSpan":
       return timeSpanWindow(validity);
+    case "repeated":
+      return repeatedWindow(validity);
+    case "oneTime":
+      return dialect.oneTime(tz);
     default:
       throw new Error(`lock.addPasscode: ${JSON.stringify(validity)} is not a validity`);
   }
@@ -353,20 +437,20 @@ function windowOf(validity: PasscodeValidity | undefined): PasscodeWindow {
 
 /**
  * The fields of the add-passcode frame after its time and account id (`A3`…`AD`): the code as ASCII
- * digits, user type `4` (a keypad user), the window's dates, weekdays and times, the single-use field `0`,
- * the name, the user's short id as two bytes, and the window's validity. Byte-for-byte the frame the app
- * sends to add a code to a C33, a C30 or an S3.
+ * digits, the window's user type, dates, weekdays, times and single-use field, the name, the user's short
+ * id as two bytes, and the window's validity. Byte-for-byte the frame the app sends to add a code to a
+ * C33, a C30 or an S3.
  */
 function passcodeFields(passcode: string, name: string, shortUserId: string, window: PasscodeWindow): Buffer[] {
   return [
     Buffer.from(passcode, "ascii"),
-    Buffer.from([4]),
+    Buffer.from([window.userType]),
     window.startDate,
     window.endDate,
     Buffer.from([window.week]),
     window.startTime,
     window.endTime,
-    Buffer.from([0]),
+    Buffer.from([window.singleUse]),
     Buffer.from(name, "utf8"),
     Buffer.from(shortUserId, "hex"),
     Buffer.from([window.validity]),
@@ -419,7 +503,7 @@ async function addPasscode(
   if (passcode.length > MAX_FIELD_BYTES || Buffer.byteLength(name, "utf8") > MAX_FIELD_BYTES) {
     throw new Error(`lock.addPasscode: a passcode and a name are each at most ${MAX_FIELD_BYTES} bytes`);
   }
-  const window = windowOf(validity);
+  const window = windowOf(validity, lock.tz, lock.dialect);
   const schedule = lock.dialect.schedule({ window, validity, tz: lock.tz });
   const { shortUserId } = await lock.users.addUser(name);
   const reply = await lock
@@ -699,10 +783,10 @@ export const LOCK_MEMBERS = {
   },
 
   /**
-   * Add a keypad code for a new user named `name` (see {@link addPasscode}): permanent, or within the time
-   * span `validity` gives. Answers the user's short id and the code's password id, both as the
-   * 4-hex-digit strings the cloud's user list carries. Smart Lock C33, C30 and FamiLock S3, both kinds
-   * confirmed on all three.
+   * Add a keypad code for a new user named `name` (see {@link addPasscode}): permanent, or as `validity`
+   * says — a time span, repeated entry on chosen weekdays, or once. Answers the user's short id and the
+   * code's password id, both as the 4-hex-digit strings the cloud's user list carries. Smart Lock C33, C30
+   * and FamiLock S3, each kind confirmed on all three.
    */
   addPasscode: provided(
     "deviceUsers",
@@ -712,7 +796,7 @@ export const LOCK_MEMBERS = {
         ? (name: string, passcode: string, validity?: PasscodeValidity) => addPasscode(lock, name, passcode, validity)
         : undefined;
     },
-    "Add a keypad passcode for a new user: permanent, or within a time span.",
+    "Add a keypad passcode for a new user: permanent, within a time span, on chosen weekdays, or once.",
   ),
 
   /**
