@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import type { LockActions } from "../lock.js";
+import type { LockActions, PasscodeValidity } from "../lock.js";
 import { bind } from "./bind.js";
 import type { CommandContext } from "../types.js";
 import type { DeviceUserDirectory, Ff09Reply, Ff09SettingsReader } from "../../../core/contracts.js";
@@ -142,13 +142,71 @@ describe("lock.addPasscode — Smart Lock C33", () => {
     expect(users.addUser).not.toHaveBeenCalled();
   });
 
-  it("refuses a name the frame cannot carry before touching the cloud", async () => {
+  it("refuses a name or validity the frame cannot carry before touching the cloud", async () => {
+    const refusals: Array<[string, PasscodeValidity | undefined, RegExp]> = [
+      ["x".repeat(256), undefined, /at most 255 bytes/],
+      ["Guest", { kind: "permanent" } as unknown as PasscodeValidity, /is not a validity/],
+    ];
+    for (const [name, validity, reason] of refusals) {
+      const { users, ff09Settings } = fakes();
+      await expect(lockOf(c33, { users, ff09Settings }).addPasscode!(name, "1234", validity)).rejects.toThrow(reason);
+      expect(users.addUser).not.toHaveBeenCalled();
+    }
+  });
+
+  it("sends a time span as the app does, and records its days as instants on the lock's clock", async () => {
     const { users, ff09Settings } = fakes();
 
-    await expect(lockOf(c33, { users, ff09Settings }).addPasscode!("x".repeat(256), "1234")).rejects.toThrow(
-      /at most 255 bytes/,
-    );
-    expect(users.addUser).not.toHaveBeenCalled();
+    await lockOf(c33, { users, ff09Settings }).addPasscode!("Guest", "22334455", {
+      kind: "timeSpan",
+      starts: { year: 2026, month: 11, day: 12, hour: 9, minute: 30 },
+      ends: { year: 2026, month: 12, day: 24, hour: 17, minute: 45 },
+    });
+
+    const fields = vi.mocked(ff09Settings.exchange!).mock.calls[0]![2].map((f) => f.toString("hex"));
+    expect(fields.slice(2, 7)).toEqual(["ea070b0c", "ea070c18", "ff", "091e", "112d"]);
+    expect(fields[10]).toBe("02");
+    expect(users.savePassword).toHaveBeenCalledWith("0007", {
+      passwordId: "0007",
+      passwordType: 1,
+      schedule: JSON.stringify({
+        startDate: 1794459600,
+        endDate: 1798174799,
+        timePeriodNum: 1,
+        timePeriods: [{ periodic: 255, startTime: "09:30", endTime: "17:45" }],
+      }),
+    });
+  });
+
+  it("refuses a time span it cannot spell before touching the cloud", async () => {
+    const at = (day: number, hour = 9, minute = 0, second?: number) => ({
+      year: 2026,
+      month: 2,
+      day,
+      hour,
+      minute,
+      second,
+    });
+    const span = (starts: ReturnType<typeof at>, ends: ReturnType<typeof at>) => ({
+      kind: "timeSpan" as const,
+      starts,
+      ends,
+    });
+    const refusals: Array<[CommandContext, ReturnType<typeof span>, RegExp]> = [
+      [c33, span(at(30), at(28)), /not a whole minute of a real date/],
+      [c33, span(at(10, 24), at(12)), /not a whole minute of a real date/],
+      [c33, span(at(10, 9, 0, 30), at(12)), /not a whole minute of a real date/],
+      [c33, span(at(12), at(12)), /end after it starts/],
+      [{ ...c33, timezone: undefined }, span(at(10), at(12)), /clock zone/],
+      [{ ...c33, timezone: "Mars/Olympus" }, span(at(10), at(12)), /clock zone/],
+    ];
+    for (const [ctx, validity, reason] of refusals) {
+      const { users, ff09Settings } = fakes();
+      await expect(lockOf(ctx, { users, ff09Settings }).addPasscode!("Guest", "1234", validity)).rejects.toThrow(
+        reason,
+      );
+      expect(users.addUser).not.toHaveBeenCalled();
+    }
   });
 
   it("is present on the C33, absent off it, and without either provider or the exchange", () => {
@@ -168,6 +226,6 @@ declare const lk: LockActions;
 const _optional: Exact<undefined extends typeof lk.addPasscode ? true : false, true> = true;
 const _signature: Exact<
   NonNullable<typeof lk.addPasscode>,
-  (name: string, passcode: string) => Promise<{ shortUserId: string; passwordId: string }>
+  (name: string, passcode: string, validity?: PasscodeValidity) => Promise<{ shortUserId: string; passwordId: string }>
 > = true;
 export const _surfaceAssertions = [_optional, _signature];
