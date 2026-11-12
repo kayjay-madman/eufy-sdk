@@ -280,18 +280,25 @@ station holds, `downloadRecording()`. Stills, talkback and camera settings are a
 ## Keypad passcodes
 
 The Smart Lock C33 adds a keypad code for a new user with
-`lock().addPasscode(name, passcode)`, the way the app adds one: the cloud records the user, the lock stores
-the code under the user's short id, and the cloud records the code. It answers `{ shortUserId, passwordId }`.
+`lock().addPasscode(name, passcode, validity?)`, the way the app adds one: the cloud records the user, the
+lock stores the code under the user's short id, and the cloud records the code and when it admits. It answers
+`{ shortUserId, passwordId }`.
 
 ```ts
 const keypad = dev.lock?.();
 await keypad?.addPasscode?.("Guest", "13572468"); // permanent
+await keypad?.addPasscode?.("Stay", "24681357", {
+  kind: "timeSpan", // the app's Schedule → Time Span
+  starts: { year: 2026, month: 11, day: 12, hour: 15, minute: 0 },
+  ends: { year: 2026, month: 11, day: 15, hour: 11, minute: 0 },
+});
 ```
 
-A passcode or name the lock's frame cannot carry rejects before anything is sent. A later failure names the
-cloud user it leaves, and the code's password id once the lock has stored it. A lock refuses a passcode it
-already holds (device result 17); as with the app, the cloud user stays, holding no code.
+Dates and times are wall times on the lock's own clock, in the zone its station reports. A passcode, name or
+validity the lock's frame cannot carry rejects before anything is sent. A later failure names the cloud user it
+leaves, and the code's password id once the lock has stored it. A lock refuses a passcode it already holds
+(device result 17); as with the app, the cloud user stays, holding no code.
 
-A permanent code is confirmed on the C33.
+Each kind of code is confirmed on the C33.
 
 Next: [Events](/events) · [Live media](/live-media).

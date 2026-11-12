@@ -270,7 +270,10 @@ export interface AvailabilityContext {
 }
 
 export interface CommandContext extends AvailabilityContext {
-  /** Vendor-formatted timezone reported by the station; never inferred from the host. */
+  /**
+   * Vendor-formatted timezone reported by the station — the parent's, or the device's own when it is its
+   * own station; never inferred from the host.
+   */
   timezone?: string;
   /** Device channel (0 for standalone, `device_channel` on a HomeBase). */
   channel: number;

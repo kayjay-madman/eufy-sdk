@@ -104,7 +104,7 @@ import type { RgbColor, SmartLightActions } from "./smart-light.js";
 import type { CameraActions } from "./camera.js";
 import type { AudioActions } from "./audio.js";
 import type { BatteryActions } from "./battery.js";
-import type { LockActions } from "./lock.js";
+import type { LockActions, PasscodeValidity } from "./lock.js";
 import type { SirenActions } from "./siren.js";
 import type { ArmingActions } from "./arming.js";
 import type { DoorbellActions } from "./doorbell.js";
@@ -1033,6 +1033,7 @@ export type {
   RgbColor,
   CameraActions,
   LockActions,
+  PasscodeValidity,
   SirenActions,
   ArmingActions,
   BatteryActions,

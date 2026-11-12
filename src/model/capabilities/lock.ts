@@ -1,5 +1,6 @@
 import { isClassicWifiLock, isFamiLockS3, isSmartLockC33, isVideoSmartLock } from "../device-family.js";
 import { asBool } from "../../core/util.js";
+import { posixWallClockToEpoch, type WallClockTime } from "../../core/posix-tz.js";
 import { LockPushEvent } from "../push-events.js";
 import { describeDevice } from "./access.js";
 import { method, propertiesOf, provided, type MemberDeps, type Members, type Surface } from "./members.js";
@@ -174,19 +175,28 @@ const MAX_FIELD_BYTES = 0xff;
 /** The models whose keypad users are added here: the Smart Lock C33. */
 const keepsKeypadUsers = (ctx: CommandContext): boolean => isSmartLockC33(ctx);
 
+/**
+ * When a keypad code admits its holder, on the lock's own clock; a code added without one is permanent.
+ * Each kind is one of the app's choices for a new user:
+ *
+ * - `timeSpan` — Schedule → Time Span: one continuous window from `starts` to `ends`, wall times on the
+ *   lock's clock to the minute.
+ */
+export type PasscodeValidity = { kind: "timeSpan"; starts: WallClockTime; ends: WallClockTime };
+
 /** A code's window as the add-passcode frame spells it (`A5`…`A9`, `AD`). */
 interface PasscodeWindow {
-  /** `A5`: the first day, `00000000` for none. */
+  /** `A5`: the first day, as {@link frameDate}; `00000000` for none. */
   startDate: Buffer;
-  /** `A6`: the last day, `ffffffff` for none. */
+  /** `A6`: the last day, as {@link frameDate}; `ffffffff` for none. */
   endDate: Buffer;
-  /** `A7`: the weekdays it admits on, `7f` for every day. */
+  /** `A7`: the weekdays it admits on: `7f` for a permanent code, `ff` for a Time Span. */
   week: number;
   /** `A8`: the time of day the code opens, `[hour, minute]`. */
   startTime: Buffer;
   /** `A9`: the time of day the code closes, `[hour, minute]`; `ffff` for the end of the day. */
   endTime: Buffer;
-  /** `AD`: the kind of window, `0` for a permanent code. */
+  /** `AD`: `0` for a permanent code, `2` for a Time Span. */
   validity: number;
 }
 
@@ -203,6 +213,66 @@ const PERMANENT_WINDOW: PasscodeWindow = {
   validity: 0,
 };
 
+/** Whether `t` names a real calendar day the frame can carry (a `u16` year from 2000). */
+function isRealDay(t: Pick<WallClockTime, "year" | "month" | "day">): boolean {
+  const d = new Date(Date.UTC(t.year, t.month - 1, t.day));
+  return (
+    [t.year, t.month, t.day].every(Number.isInteger) &&
+    t.year >= 2000 &&
+    t.year <= 0xffff &&
+    d.getUTCFullYear() === t.year &&
+    d.getUTCMonth() === t.month - 1 &&
+    d.getUTCDate() === t.day
+  );
+}
+
+/** A day as the frame spells it: `u16 LE year ‖ month ‖ day`. */
+const frameDate = (t: Pick<WallClockTime, "year" | "month" | "day">) =>
+  Buffer.from([t.year & 0xff, t.year >> 8, t.month, t.day]);
+
+/**
+ * A Time Span's window, as the app sends it: each date as {@link frameDate}, each time as
+ * `[hour, minute]`, every weekday (`ff`), validity `2`. Throws on a time that is not a whole minute of a
+ * real date, and on an end not after its start.
+ */
+function timeSpanWindow(span: Extract<PasscodeValidity, { kind: "timeSpan" }>): PasscodeWindow {
+  const { starts, ends } = span;
+  for (const t of [starts, ends]) {
+    if (
+      !isRealDay(t) ||
+      !Number.isInteger(t.hour) ||
+      !Number.isInteger(t.minute) ||
+      t.hour < 0 ||
+      t.hour > 23 ||
+      t.minute < 0 ||
+      t.minute > 59 ||
+      (t.second ?? 0) !== 0
+    ) {
+      throw new Error(`lock.addPasscode: ${JSON.stringify(t)} is not a whole minute of a real date`);
+    }
+  }
+  const wall = (t: WallClockTime) => Date.UTC(t.year, t.month - 1, t.day, t.hour, t.minute);
+  if (wall(ends) <= wall(starts)) throw new Error("lock.addPasscode: a time span must end after it starts");
+  return {
+    ...PERMANENT_WINDOW,
+    startDate: frameDate(starts),
+    endDate: frameDate(ends),
+    week: 0xff,
+    startTime: Buffer.from([starts.hour, starts.minute]),
+    endTime: Buffer.from([ends.hour, ends.minute]),
+    validity: 2,
+  };
+}
+
+/** The instant `time` names on the lock's clock `tz`. Throws on a zone this cannot evaluate. */
+function onLockClock(tz: string | undefined, time: WallClockTime): number {
+  const at = posixWallClockToEpoch(tz ?? "", time);
+  if (at === undefined) {
+    throw new Error(`lock.addPasscode: the lock's clock zone ${JSON.stringify(tz)} is not one the SDK can read`);
+  }
+  return at;
+}
+
 /** The cloud schedule the app records for a code with no dates or times: a permanent one. */
 const UNBOUNDED_SCHEDULE = JSON.stringify({
   startDate: 0,
@@ -210,6 +280,38 @@ const UNBOUNDED_SCHEDULE = JSON.stringify({
   timePeriodNum: 1,
   timePeriods: [{ periodic: 127, startTime: "0:0", endTime: "-1:-1" }],
 });
+
+/** A time of day as a Time Span's cloud record spells it, `HH:MM`. */
+const hhmm = (t: WallClockTime) => `${String(t.hour).padStart(2, "0")}:${String(t.minute).padStart(2, "0")}`;
+
+/**
+ * A code's schedule as the cloud record of a Smart Lock C33 stores it, as the app records it. A
+ * Time Span carries its first day's midnight and its last day's last second as instants on the lock's
+ * clock `tz`, and one time period, `periodic` 255 with its two times as `HH:MM`. A permanent code
+ * carries {@link UNBOUNDED_SCHEDULE}. Throws on a lock clock `tz` this cannot evaluate.
+ */
+function smartLockSchedule(validity: PasscodeValidity | undefined, tz: string | undefined): string {
+  if (!validity) return UNBOUNDED_SCHEDULE;
+  const { starts, ends } = validity;
+  return JSON.stringify({
+    startDate: onLockClock(tz, { ...starts, hour: 0, minute: 0, second: 0 }),
+    endDate: onLockClock(tz, { ...ends, hour: 23, minute: 59, second: 59 }),
+    timePeriodNum: 1,
+    timePeriods: [{ periodic: 255, startTime: hhmm(starts), endTime: hhmm(ends) }],
+  });
+}
+
+/** The window `validity` asks for; permanent without one. Throws on a kind it does not know. */
+function windowOf(validity: PasscodeValidity | undefined): PasscodeWindow {
+  switch (validity?.kind) {
+    case undefined:
+      return PERMANENT_WINDOW;
+    case "timeSpan":
+      return timeSpanWindow(validity);
+    default:
+      throw new Error(`lock.addPasscode: ${JSON.stringify(validity)} is not a validity`);
+  }
+}
 
 /**
  * The fields of the add-passcode frame after its time and account id (`A3`…`AD`): the code as ASCII
@@ -233,17 +335,23 @@ function passcodeFields(passcode: string, name: string, shortUserId: string, win
   ];
 }
 
-/** A lock's keypad users as bound: their cloud records and the lock's `ff09` exchange. */
+/** A lock's keypad users as bound: their cloud records, the lock's `ff09` exchange and its clock. */
 interface KeypadLock {
   users: DeviceUserDirectory;
   exchange: NonNullable<Ff09SettingsReader["exchange"]>;
+  /** The lock's clock zone, as its station reports it. */
+  tz: string | undefined;
 }
 
 /** The keypad binding of a model that keeps keypad users here, once its `ff09` exchange is bound. */
 function keypadLockOf(users: DeviceUserDirectory, { ctx, ff09Settings }: MemberDeps): KeypadLock | undefined {
   const exchange = ff09Settings?.exchange?.bind(ff09Settings);
   if (!keepsKeypadUsers(ctx) || !exchange) return undefined;
-  return { users, exchange };
+  return {
+    users,
+    exchange,
+    tz: ctx.timezone,
+  };
 }
 
 /**
@@ -253,27 +361,26 @@ function keypadLockOf(users: DeviceUserDirectory, { ctx, ff09Settings }: MemberD
  * app records it) and its schedule under the user in the cloud, which lists the user with no password
  * until it is.
  *
- * A code or name that cannot be sent rejects before anything is sent. Any later failure rejects naming
- * the cloud user created for it, and the code's password id once the lock has stored it. A lock refusal
- * leaves that user in the cloud holding no code, as the app leaves it (a lock refuses a passcode it
- * already holds with status `17`).
+ * A code, name or window that cannot be sent rejects before anything is sent. Any later failure rejects
+ * naming the cloud user created for it, and the code's password id once the lock has stored it. A lock
+ * refusal leaves that user in the cloud holding no code, as the app leaves it (a lock refuses a passcode
+ * it already holds with status `17`).
  */
 async function addPasscode(
   lock: KeypadLock,
   name: string,
   passcode: string,
+  validity?: PasscodeValidity,
 ): Promise<{ shortUserId: string; passwordId: string }> {
   if (!/^\d+$/.test(passcode)) throw new Error("lock.addPasscode: a passcode is digits only");
   if (passcode.length > MAX_FIELD_BYTES || Buffer.byteLength(name, "utf8") > MAX_FIELD_BYTES) {
     throw new Error(`lock.addPasscode: a passcode and a name are each at most ${MAX_FIELD_BYTES} bytes`);
   }
+  const window = windowOf(validity);
+  const schedule = smartLockSchedule(validity, lock.tz);
   const { shortUserId } = await lock.users.addUser(name);
   const reply = await lock
-    .exchange(
-      PASSCODE_WIRE.ADD,
-      PASSCODE_WIRE.API_COMMAND,
-      passcodeFields(passcode, name, shortUserId, PERMANENT_WINDOW),
-    )
+    .exchange(PASSCODE_WIRE.ADD, PASSCODE_WIRE.API_COMMAND, passcodeFields(passcode, name, shortUserId, window))
     .catch((e: Error) => {
       throw new Error(`lock.addPasscode: ${e.message} (cloud user ${shortUserId} remains)`, { cause: e });
     });
@@ -286,7 +393,7 @@ async function addPasscode(
   }
   const added = { shortUserId, passwordId: passwordId.toString("hex").toUpperCase() };
   await lock.users
-    .savePassword(shortUserId, { passwordId: added.passwordId, passwordType: 1, schedule: UNBOUNDED_SCHEDULE })
+    .savePassword(shortUserId, { passwordId: added.passwordId, passwordType: 1, schedule })
     .catch((e: Error) => {
       throw new Error(
         `lock.addPasscode: the lock stored code ${added.passwordId} under user ${shortUserId}, but the cloud ` +
@@ -531,27 +638,34 @@ export const LOCK_MEMBERS = {
   },
 
   /**
-   * Add a permanent keypad code for a new user named `name` (see {@link addPasscode}). Answers the user's
-   * short id and the code's password id, both as the 4-hex-digit strings the cloud's user list carries.
-   * Smart Lock C33, where it is confirmed.
+   * Add a keypad code for a new user named `name` (see {@link addPasscode}): permanent, or within the time
+   * span `validity` gives. Answers the user's short id and the code's password id, both as the
+   * 4-hex-digit strings the cloud's user list carries. Smart Lock C33, where both kinds are confirmed.
    */
   addPasscode: provided(
     "deviceUsers",
     (users, deps) => {
       const lock = keypadLockOf(users, deps);
-      return lock ? (name: string, passcode: string) => addPasscode(lock, name, passcode) : undefined;
+      return lock
+        ? (name: string, passcode: string, validity?: PasscodeValidity) => addPasscode(lock, name, passcode, validity)
+        : undefined;
     },
-    "Add a permanent keypad passcode for a new user.",
+    "Add a keypad passcode for a new user: permanent, or within a time span.",
   ),
 
-  /** Read the current device-reported state; undefined means no settled locked/unlocked state. */
+  /**
+   * Read the current device-reported state through a HomeBase, with the station's reported timezone;
+   * undefined means no settled locked/unlocked state.
+   */
   refreshStatus: {
     ...provided(
       "media",
       (media, { ctx }) => {
         const query = media.p2pQuery?.bind(media);
         const timezone = ctx.timezone;
-        return isVideoSmartLock(ctx) && timezone && query ? () => refreshStatus(query, timezone) : undefined;
+        return isVideoSmartLock(ctx) && ctx.homeBaseAttached && timezone && query
+          ? () => refreshStatus(query, timezone)
+          : undefined;
       },
       "Read the current lock state from the device.",
     ),
