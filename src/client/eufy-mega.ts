@@ -57,6 +57,7 @@ import {
   type CommandObservation,
   type CommandSink,
   type Ff09SettingsReader,
+  type DeviceUserDirectory,
   type MediaProvider,
   type TuyaDpInbound,
 } from "../core/contracts.js";
@@ -717,6 +718,7 @@ export class EufyMega extends EventEmitter {
         this.mediaProviderFor(sn),
         this.ff09SettingsReaderFor(sn, ctx),
         rawDpCodec,
+        this.deviceUsersFor(sn, ctx),
       );
       this.boundParamIds.set(sn, new Set([...(this.boundParamIds.get(sn) ?? []), ...ctx.paramIds]));
       this.emit("deviceState", this.deviceState(sn));
@@ -1511,6 +1513,7 @@ export class EufyMega extends EventEmitter {
       this.mediaProviderFor(sn),
       this.ff09SettingsReaderFor(sn, ctx),
       rawDpCodec,
+      this.deviceUsersFor(sn, ctx),
     );
     this.boundParamIds.set(sn, ctx.paramIds);
     if (this.opts.autoRealtime !== false) {
@@ -1536,9 +1539,10 @@ export class EufyMega extends EventEmitter {
    * `CommandContext.adminUserId`'s own doc: "present on lock-family devices, absent elsewhere").
    *
    * It earns its own boundary because `GET_SETTINGS` is a request/reply query that neither
-   * `CommandSink` (write-only) nor `MediaProvider.p2pQuery` (P2P-only, no decrypt) fits. Named for the
-   * frame family rather than the capability, so this facade stays capability-neutral like the layers
-   * below it — see `CapabilityModule.actions`'s doc before adding another.
+   * `CommandSink` (write-only) nor `MediaProvider.p2pQuery` (P2P-only, no decrypt) fits. `exchange` goes
+   * over secure MQTT, the wire the vendor app sends these commands on. Named for the frame family rather
+   * than the capability, so this facade stays capability-neutral like the layers below it — see
+   * `CapabilityModule.actions`'s doc before adding another.
    */
   private ff09SettingsReaderFor(sn: string, ctx: CommandContext): Ff09SettingsReader | undefined {
     if (!ctx.adminUserId) return undefined;
@@ -1549,6 +1553,21 @@ export class EufyMega extends EventEmitter {
         ctx.hasP2p && !isFamiLockS3(ctx)
           ? this.p2p.getAutoLockState(sn, { adminUserId, deviceSn })
           : this.mqtt.getAutoLockState(sn, { adminUserId, deviceSn }),
+      exchange: (commandCode, apiCommand, fields) =>
+        this.mqtt.exchangeFf09(sn, { adminUserId, deviceSn, commandCode, apiCommand, fields }),
+    };
+  }
+
+  /**
+   * The {@link DeviceUserDirectory} for one device: the cloud's local-user records, kept on the
+   * security-app host under the device's serial and its parent station's, empty for a device that is its
+   * own station.
+   */
+  private deviceUsersFor(sn: string, ctx: CommandContext): DeviceUserDirectory {
+    const stationSn = ctx.stationSerial ?? "";
+    return {
+      addUser: (nickName) => this.mega.addDeviceLocalUser(sn, stationSn, nickName),
+      savePassword: (shortUserId, password) => this.mega.saveDevicePassword(sn, stationSn, shortUserId, password),
     };
   }
 
@@ -1900,6 +1919,7 @@ export class EufyMega extends EventEmitter {
         this.mediaProviderFor(sn),
         this.ff09SettingsReaderFor(sn, ctx),
         rawDpCodec,
+        this.deviceUsersFor(sn, ctx),
       );
       this.boundParamIds.set(sn, ctx.paramIds);
       this.emit("deviceCapabilities", { deviceSn: sn, gained, capabilities: [...dev.capabilities] });

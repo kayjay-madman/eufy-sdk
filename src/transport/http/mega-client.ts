@@ -24,6 +24,7 @@ import {
 import { MemorySessionStore, isSessionValid, type SessionStore } from "../../core/store.js";
 import { noopLogger, type Logger } from "../../core/logger.js";
 import type { EufyDevice } from "../../core/types.js";
+import type { DeviceUserPassword } from "../../core/contracts.js";
 import type { SecureMqttCredentials } from "../mqtt/secure-mqtt.js";
 import { withoutTokenEcho } from "../token-echo.js";
 import { downloadMediaResource, mediaFailureError, MediaDownloadAuthenticationError } from "./media-download.js";
@@ -1093,6 +1094,49 @@ export class MegaHttpClient {
    */
   async securityAppPost<T = any>(path: string, body: Record<string, unknown> = {}): Promise<T> {
     return this.postSigned<T>(this.securityAppHost(), path, body, true);
+  }
+
+  /**
+   * Create a local-user record on a device — `POST /v3/app/device/local_user/add` on the security-app
+   * host, the call the vendor app makes before it tells a lock about a new keypad user. The cloud assigns
+   * the user's 4-hex-digit short id, the identity the device then stores the user under.
+   *
+   * `stationSn` is the parent station's serial, empty for a device that is its own station, as the app
+   * sends it. Rejects on a non-zero envelope code, and on an answer carrying no short id of that shape.
+   */
+  async addDeviceLocalUser(deviceSn: string, stationSn: string, nickName: string): Promise<{ shortUserId: string }> {
+    const out = await this.securityAppPost<{ short_user_id?: unknown }>("/v3/app/device/local_user/add", {
+      device_sn: deviceSn,
+      nick_name: nickName,
+      station_sn: stationSn,
+    });
+    const shortUserId = out?.short_user_id;
+    if (typeof shortUserId !== "string" || !/^[0-9a-fA-F]{4}$/.test(shortUserId)) {
+      throw new Error(`local_user/add answered no short_user_id (${JSON.stringify(shortUserId)})`);
+    }
+    return { shortUserId };
+  }
+
+  /**
+   * Record a device-stored password under one of the device's local users —
+   * `POST /v3/app/device/password/save_or_update` on the security-app host, the call the vendor app makes
+   * once a lock has stored a new keypad code. Without it the cloud lists the user with no password.
+   * `stationSn` is as {@link addDeviceLocalUser} takes it. Rejects on a non-zero envelope code.
+   */
+  async saveDevicePassword(
+    deviceSn: string,
+    stationSn: string,
+    shortUserId: string,
+    password: DeviceUserPassword,
+  ): Promise<void> {
+    await this.securityAppPost("/v3/app/device/password/save_or_update", {
+      device_sn: deviceSn,
+      short_user_id: shortUserId,
+      station_sn: stationSn,
+      password_list: [
+        { password_id: password.passwordId, password_type: password.passwordType, schedule: password.schedule },
+      ],
+    });
   }
 
   /**

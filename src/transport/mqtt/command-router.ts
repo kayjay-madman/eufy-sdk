@@ -6,6 +6,7 @@
  * The MQTT-bound kinds are `ff09-*` (`ff09-actuate` — a single fire-and-forget frame; `ff09-autolock`
  * — a GET-then-SET read-modify-write) and `mqtt-dp`/`mqtt-dp-color`/`mqtt-dp-preset` (the `eufy_life` DP TLV writes
  * behind the T8L0x smart lights), routed here when a device's stack is MQTT (see {@link claimsDevice}).
+ * The `ff09` request/reply reads ({@link getAutoLockState}, {@link exchangeFf09}) ride the same connection.
  * A future command family (another frame, another protocol) is one more {@link dispatchCommand} branch
  * — nothing here is ff09-only by design.
  *
@@ -24,20 +25,23 @@
  */
 import { randomBytes } from "node:crypto";
 import type { EufyDevice } from "../../core/types.js";
-import type { Command, AutoLockSnapshot } from "../../core/contracts.js";
+import type { Command, AutoLockSnapshot, Ff09Reply } from "../../core/contracts.js";
 import { noopLogger, type Logger } from "../../core/logger.js";
 import type { MegaHttpClient } from "../http/mega-client.js";
 import {
   buildFf09Frame,
   buildFf09QueryFrame,
   buildFf09AutolockSetFrame,
+  buildFf09CommandFrame,
   decryptFf09Frame,
+  ff09FrameCode,
   parseFf09SettingsResponse,
   decodeFf09AutoLockSnapshot,
   ff09ReplyKeyTime,
   ff09TransferPayload,
   CMD_TRANSFER_PAYLOAD,
   type Ff09Frame,
+  type Ff09CommandFrameInput,
   type Ff09FrameInput,
   type Ff09TransferPayload,
 } from "../ff09.js";
@@ -607,7 +611,15 @@ export class MqttCommandRouter {
       const topic = ff09MqttTopic(dev.model, sn);
 
       // ── 1. GET current settings, matched back by keyTime (shared with getAutoLockState — see helper). ──
-      const getReply = await this.fetchFf09SettingsGetReply(mqtt, topic, sn, cmd, instanceIp);
+      const getReply = await this.awaitFf09Reply(
+        mqtt,
+        topic,
+        sn,
+        buildFf09QueryTrans(cmd),
+        cmd.adminUserId,
+        instanceIp,
+        "settings GET",
+      );
 
       // ── 2+3. Decrypt the reply, preserve A7/A8 + delay, build the SET frame (shared with the P2P
       //         sibling — see buildFf09AutolockSetFrame), then wrap it in the MQTT trans envelope. ──
@@ -646,51 +658,54 @@ export class MqttCommandRouter {
   }
 
   /**
-   * Shared GET-and-wait step behind both {@link dispatchFf09Autolock} (which reads to preserve A7/A8
-   * across a write) and {@link getAutoLockState} (which reads for its own sake) — extracted so the two
-   * don't drift on the query/keyTime-matching machinery. Takes an already-connected+subscribed
+   * Publish one `ff09` trans and wait for the device's reply to it — the step behind the settings GET
+   * ({@link dispatchFf09Autolock} reads to preserve A7/A8 across a write, {@link getAutoLockState} reads
+   * for its own sake) and {@link exchangeFf09}, so they cannot drift on the matching. A reply is the
+   * `/res` message whose `time` (a hex string) is the request's keyTime and whose frame carries the
+   * request's opcode; the plaintext state report a lock pushes after an actuation echoes the same `time`
+   * under another opcode, so `time` alone is not enough. Takes an already-connected+subscribed
    * `mqtt`/`topic`; connection lifecycle stays the caller's concern (the write path keeps the
-   * connection open for a following SET, the read path closes right after). Throws if no matching
-   * reply arrives within {@link FF09_ACK_TIMEOUT_MS}.
+   * connection open for a following SET, the read path closes right after). Throws if no matching reply
+   * arrives within {@link FF09_ACK_TIMEOUT_MS}; `what` names the request in that error.
    */
-  private async fetchFf09SettingsGetReply(
+  private async awaitFf09Reply(
     mqtt: SecureMqtt,
     topic: string,
     sn: string,
-    cmd: { adminUserId: string; deviceSn: string },
+    trans: Ff09Trans,
+    accountId: string,
     instanceIp: string,
+    what: string,
   ): Promise<{ lockPayload: string; keyTime: number }> {
-    const queryTrans = buildFf09QueryTrans({ adminUserId: cmd.adminUserId, deviceSn: cmd.deviceSn });
-    const getReplyPromise = this.waitForMqttMessage(
+    const code = ff09FrameCode(trans.payload.lock_payload);
+    const replyPromise = this.waitForMqttMessage(
       mqtt,
       (m) => {
         const reply = parseFf09SettingsResponseTrans(m.raw);
         if (!reply || reply.cmd !== CMD_TRANSFER_PAYLOAD) return undefined;
         const keyTime = ff09ReplyKeyTime(reply.payload.time);
-        if (keyTime === undefined || keyTime !== queryTrans.payload.time) return undefined; // other traffic — keep waiting
+        if (keyTime === undefined || keyTime !== trans.payload.time) return undefined; // other traffic — keep waiting
+        if (ff09FrameCode(reply.payload.lock_payload) !== code) return undefined;
         return { lockPayload: reply.payload.lock_payload, keyTime };
       },
       MqttCommandRouter.FF09_ACK_TIMEOUT_MS,
     );
-    await mqtt.publish(
-      topic,
-      buildFf09MqttEnvelope({ trans: queryTrans, clientId: mqtt.id, accountId: cmd.adminUserId, deviceSn: sn }),
-      { qos: 1 },
-    );
-    const getReply = await getReplyPromise;
-    if (!getReply) {
+    await mqtt.publish(topic, buildFf09MqttEnvelope({ trans, clientId: mqtt.id, accountId, deviceSn: sn }), {
+      qos: 1,
+    });
+    const reply = await replyPromise;
+    if (!reply) {
       throw new Error(
-        `fetchFf09SettingsGetReply(${sn}): no settings GET reply within ${MqttCommandRouter.FF09_ACK_TIMEOUT_MS}ms on ` +
-          `${instanceIp}.`,
+        `awaitFf09Reply(${sn}): no ${what} reply within ${MqttCommandRouter.FF09_ACK_TIMEOUT_MS}ms on ${instanceIp}.`,
       );
     }
-    return getReply;
+    return reply;
   }
 
   /**
    * **Read a lock's current auto-lock settings over MQTT** — the `Ff09SettingsReader` implementation.
    * A pure GET, no SET: opens its own one-shot MQTT connection (same
-   * lifecycle as {@link dispatchFf09Autolock}), reuses {@link fetchFf09SettingsGetReply}, then decrypts
+   * lifecycle as {@link dispatchFf09Autolock}), reuses {@link awaitFf09Reply}, then decrypts
    * + decodes fields `a1`-`a5` per `transport/ff09.ts`'s response tag map. Verified on a FamiLock S3,
    * whose read answered the values the vendor app's own read of it returned.
    */
@@ -701,7 +716,15 @@ export class MqttCommandRouter {
     try {
       await mqtt.subscribeDevice(dev);
       const topic = ff09MqttTopic(dev.model, sn);
-      const getReply = await this.fetchFf09SettingsGetReply(mqtt, topic, sn, cmd, instanceIp);
+      const getReply = await this.awaitFf09Reply(
+        mqtt,
+        topic,
+        sn,
+        buildFf09QueryTrans(cmd),
+        cmd.adminUserId,
+        instanceIp,
+        "settings GET",
+      );
       return decodeFf09AutoLockSnapshot(
         parseFf09SettingsResponse(
           decryptFf09Frame({
@@ -711,6 +734,36 @@ export class MqttCommandRouter {
             deviceSn: cmd.deviceSn,
           }),
         ),
+      );
+    } finally {
+      await mqtt.disconnect();
+    }
+  }
+
+  /**
+   * **One `ff09` command and its reply over MQTT** — the `Ff09SettingsReader.exchange` implementation.
+   * Connects on its own one-shot connection (same lifecycle as {@link getAutoLockState}), then builds the
+   * frame ({@link buildFf09CommandFrame}: `[A1 time][A2 adminUserId]` + `fields`), so its time is fresh
+   * when published, waits for the reply matched by keyTime and opcode ({@link awaitFf09Reply}), and
+   * answers it decrypted. Forwards the opcode, `apiCommand` and fields opaquely; a refusal status resolves.
+   */
+  async exchangeFf09(sn: string, req: Ff09CommandFrameInput): Promise<Ff09Reply> {
+    const dev = await this.ff09DeviceFor(sn);
+    if (!dev.model) throw new Error(`exchangeFf09(${sn}): no product model (pn) — required for the topic`);
+    const { mqtt, instanceIp } = await this.ensureSecurityMqttFor(dev);
+    try {
+      await mqtt.subscribeDevice(dev);
+      const reply = await this.awaitFf09Reply(
+        mqtt,
+        ff09MqttTopic(dev.model, sn),
+        sn,
+        toFf09Trans(buildFf09CommandFrame(req)),
+        req.adminUserId,
+        instanceIp,
+        `ff09 0x${req.commandCode.toString(16)}`,
+      );
+      return parseFf09SettingsResponse(
+        decryptFf09Frame({ ...reply, adminUserId: req.adminUserId, deviceSn: req.deviceSn }),
       );
     } finally {
       await mqtt.disconnect();

@@ -20,6 +20,7 @@ import {
   type Command,
   type CommandSink,
   type Ff09SettingsReader,
+  type DeviceUserDirectory,
   type MediaProvider,
   type RawDpCodec,
 } from "../../core/contracts.js";
@@ -313,6 +314,8 @@ export interface MemberDeps {
    * so any device driven by that frame can use it — see {@link Ff09SettingsReader}.
    */
   ff09Settings?: Ff09SettingsReader;
+  /** The cloud's local-user records for the device, when it is bound to them — see {@link DeviceUserDirectory}. */
+  deviceUsers?: DeviceUserDirectory;
 }
 
 /**
@@ -397,6 +400,7 @@ export function method<F>(
 export interface Providers {
   media: MediaProvider;
   ff09Settings: Ff09SettingsReader;
+  deviceUsers: DeviceUserDirectory;
 }
 
 /**

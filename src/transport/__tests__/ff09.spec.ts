@@ -1,4 +1,11 @@
-import { buildFf09Frame, LOCK_API_COMMAND } from "../ff09.js";
+import {
+  buildFf09CommandFrame,
+  buildFf09Frame,
+  decryptFf09Frame,
+  ff09FrameCode,
+  LOCK_API_COMMAND,
+  walkFf09Tlv,
+} from "../ff09.js";
 
 /**
  * Byte-exact reproduction of a captured T8531 video-lock command.
@@ -137,5 +144,47 @@ describe("ff09 frame encoder", () => {
         }),
       ).toThrow(/shortUserId must be an even-length hex string/);
     }
+  });
+});
+
+describe("buildFf09CommandFrame / ff09FrameCode", () => {
+  const ADMIN = "0".repeat(40);
+  const SN = "T85L0K0000000000";
+
+  it("frames any opcode as [A1 time][A2 account id] + the caller's fields, carrying its apiCommand", () => {
+    const frame = buildFf09CommandFrame({
+      commandCode: 0x24,
+      apiCommand: 6012,
+      adminUserId: ADMIN,
+      deviceSn: SN,
+      fields: [Buffer.from("13572468", "ascii"), Buffer.from([4])],
+      unixTime: 1_700_000_000,
+      nonce: 7,
+      seqNum: 3,
+    });
+
+    expect(frame.apiCommand).toBe(6012);
+    expect(frame.seqNum).toBe(3);
+    expect(frame.time).toBe((1_700_000_000 | 7) >>> 0);
+    expect(ff09FrameCode(frame.lockPayload)).toBe(0x24);
+    expect(frame.lockPayload.slice(14, 18)).toBe("4024");
+    const plain = decryptFf09Frame({
+      lockPayload: frame.lockPayload,
+      keyTime: frame.time,
+      adminUserId: ADMIN,
+      deviceSn: SN,
+    });
+    const tlv = walkFf09Tlv(plain, 0, plain.length);
+    expect(tlv.get(0xa1)?.readUInt32LE(0)).toBe(1_700_000_000);
+    expect(tlv.get(0xa2)?.toString("ascii")).toBe(ADMIN);
+    expect(tlv.get(0xa3)?.toString("ascii")).toBe("13572468");
+    expect(tlv.get(0xa4)?.toString("hex")).toBe("04");
+    expect(tlv.size).toBe(4);
+  });
+
+  it("reads a reply's opcode under its own flags, the same as its request's, and nothing from a non-ff09 payload", () => {
+    expect(ff09FrameCode("ff091a0003000248240000")).toBe(0x24);
+    expect(ff09FrameCode("ff091400030102004a00")).toBe(0x4a);
+    expect(ff09FrameCode("00112233445566778899")).toBeUndefined();
   });
 });

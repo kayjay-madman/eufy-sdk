@@ -1,10 +1,17 @@
-import { isClassicWifiLock, isFamiLockS3, isVideoSmartLock } from "../device-family.js";
+import { isClassicWifiLock, isFamiLockS3, isSmartLockC33, isVideoSmartLock } from "../device-family.js";
 import { asBool } from "../../core/util.js";
 import { LockPushEvent } from "../push-events.js";
 import { describeDevice } from "./access.js";
-import { method, propertiesOf, provided, type Members, type Surface } from "./members.js";
+import { method, propertiesOf, provided, type MemberDeps, type Members, type Surface } from "./members.js";
 import type { AvailabilityContext, CapabilityModule, CommandContext, InboundSignal } from "./types.js";
-import type { Command, CommandSink, AutoLockSnapshot, MediaProvider } from "../../core/contracts.js";
+import type {
+  Command,
+  CommandSink,
+  AutoLockSnapshot,
+  DeviceUserDirectory,
+  Ff09SettingsReader,
+  MediaProvider,
+} from "../../core/contracts.js";
 
 /**
  * Setting-id selectors for the compact `ff09-setting-toggle` write — this capability's OWN wire
@@ -153,6 +160,141 @@ function nativeReport(signal: InboundSignal): Record<string, unknown> | undefine
     return undefined;
   const report = signal.json.payload as Record<string, unknown> | undefined;
   return report?.code === 0 ? report : undefined;
+}
+
+/**
+ * The keypad-user wire on the Smart Lock C33, as the vendor app drives it: the `ff09` opcode that adds a
+ * code, and the envelope `apiCommand` the app sends every command to the lock under.
+ */
+const PASSCODE_WIRE = { ADD: 0x24, API_COMMAND: 6012 } as const;
+
+/** The most bytes one field of an `ff09` frame carries: a field's length is a single byte. */
+const MAX_FIELD_BYTES = 0xff;
+
+/** The models whose keypad users are added here: the Smart Lock C33. */
+const keepsKeypadUsers = (ctx: CommandContext): boolean => isSmartLockC33(ctx);
+
+/** A code's window as the add-passcode frame spells it (`A5`…`A9`, `AD`). */
+interface PasscodeWindow {
+  /** `A5`: the first day, `00000000` for none. */
+  startDate: Buffer;
+  /** `A6`: the last day, `ffffffff` for none. */
+  endDate: Buffer;
+  /** `A7`: the weekdays it admits on, `7f` for every day. */
+  week: number;
+  /** `A8`: the time of day the code opens, `[hour, minute]`. */
+  startTime: Buffer;
+  /** `A9`: the time of day the code closes, `[hour, minute]`; `ffff` for the end of the day. */
+  endTime: Buffer;
+  /** `AD`: the kind of window, `0` for a permanent code. */
+  validity: number;
+}
+
+/**
+ * A permanent code's window: no start or end date (`00000000` / `ffffffff`), every weekday (`7f`), from
+ * `00:00` with no end time (`ffff`), validity `0`.
+ */
+const PERMANENT_WINDOW: PasscodeWindow = {
+  startDate: Buffer.from([0, 0, 0, 0]),
+  endDate: Buffer.from([0xff, 0xff, 0xff, 0xff]),
+  week: 0x7f,
+  startTime: Buffer.from([0, 0]),
+  endTime: Buffer.from([0xff, 0xff]),
+  validity: 0,
+};
+
+/** The cloud schedule the app records for a code with no dates or times: a permanent one. */
+const UNBOUNDED_SCHEDULE = JSON.stringify({
+  startDate: 0,
+  endDate: -1,
+  timePeriodNum: 1,
+  timePeriods: [{ periodic: 127, startTime: "0:0", endTime: "-1:-1" }],
+});
+
+/**
+ * The fields of the add-passcode frame after its time and account id (`A3`…`AD`): the code as ASCII
+ * digits, user type `4` (a keypad user), the window's dates, weekdays and times, the single-use field `0`,
+ * the name, the user's short id as two bytes, and the window's validity. Byte-for-byte the frame the app
+ * sends to add a code to a C33.
+ */
+function passcodeFields(passcode: string, name: string, shortUserId: string, window: PasscodeWindow): Buffer[] {
+  return [
+    Buffer.from(passcode, "ascii"),
+    Buffer.from([4]),
+    window.startDate,
+    window.endDate,
+    Buffer.from([window.week]),
+    window.startTime,
+    window.endTime,
+    Buffer.from([0]),
+    Buffer.from(name, "utf8"),
+    Buffer.from(shortUserId, "hex"),
+    Buffer.from([window.validity]),
+  ];
+}
+
+/** A lock's keypad users as bound: their cloud records and the lock's `ff09` exchange. */
+interface KeypadLock {
+  users: DeviceUserDirectory;
+  exchange: NonNullable<Ff09SettingsReader["exchange"]>;
+}
+
+/** The keypad binding of a model that keeps keypad users here, once its `ff09` exchange is bound. */
+function keypadLockOf(users: DeviceUserDirectory, { ctx, ff09Settings }: MemberDeps): KeypadLock | undefined {
+  const exchange = ff09Settings?.exchange?.bind(ff09Settings);
+  if (!keepsKeypadUsers(ctx) || !exchange) return undefined;
+  return { users, exchange };
+}
+
+/**
+ * Add a keypad code the way the vendor app does: create the user's cloud record, which assigns its short
+ * id; send the lock the code under that id, which it answers with status `0` and the code's password id
+ * in reply field `a1`; then record that password (type `1`, a keypad code, its id in upper-case hex as the
+ * app records it) and its schedule under the user in the cloud, which lists the user with no password
+ * until it is.
+ *
+ * A code or name that cannot be sent rejects before anything is sent. Any later failure rejects naming
+ * the cloud user created for it, and the code's password id once the lock has stored it. A lock refusal
+ * leaves that user in the cloud holding no code, as the app leaves it (a lock refuses a passcode it
+ * already holds with status `17`).
+ */
+async function addPasscode(
+  lock: KeypadLock,
+  name: string,
+  passcode: string,
+): Promise<{ shortUserId: string; passwordId: string }> {
+  if (!/^\d+$/.test(passcode)) throw new Error("lock.addPasscode: a passcode is digits only");
+  if (passcode.length > MAX_FIELD_BYTES || Buffer.byteLength(name, "utf8") > MAX_FIELD_BYTES) {
+    throw new Error(`lock.addPasscode: a passcode and a name are each at most ${MAX_FIELD_BYTES} bytes`);
+  }
+  const { shortUserId } = await lock.users.addUser(name);
+  const reply = await lock
+    .exchange(
+      PASSCODE_WIRE.ADD,
+      PASSCODE_WIRE.API_COMMAND,
+      passcodeFields(passcode, name, shortUserId, PERMANENT_WINDOW),
+    )
+    .catch((e: Error) => {
+      throw new Error(`lock.addPasscode: ${e.message} (cloud user ${shortUserId} remains)`, { cause: e });
+    });
+  if (reply.status !== 0) {
+    throw new Error(`lock.addPasscode: device result ${reply.status} (cloud user ${shortUserId} remains)`);
+  }
+  const passwordId = reply.fields.get(0xa1);
+  if (passwordId?.length !== 2) {
+    throw new Error(`lock.addPasscode: the lock's reply carries no password id (cloud user ${shortUserId} remains)`);
+  }
+  const added = { shortUserId, passwordId: passwordId.toString("hex").toUpperCase() };
+  await lock.users
+    .savePassword(shortUserId, { passwordId: added.passwordId, passwordType: 1, schedule: UNBOUNDED_SCHEDULE })
+    .catch((e: Error) => {
+      throw new Error(
+        `lock.addPasscode: the lock stored code ${added.passwordId} under user ${shortUserId}, but the cloud ` +
+          `did not record it: ${e.message}`,
+        { cause: e },
+      );
+    });
+  return added;
 }
 
 /**
@@ -387,6 +529,20 @@ export const LOCK_MEMBERS = {
     description: "One-touch rear locking (setting-id 11). Wire shape confirmed in the app's own JS, NOT captured.",
     write: (v, ctx) => settingToggleCommand(LOCK_SETTING_ID.ONE_TOUCH_REAR_LOCK, v, ctx),
   },
+
+  /**
+   * Add a permanent keypad code for a new user named `name` (see {@link addPasscode}). Answers the user's
+   * short id and the code's password id, both as the 4-hex-digit strings the cloud's user list carries.
+   * Smart Lock C33, where it is confirmed.
+   */
+  addPasscode: provided(
+    "deviceUsers",
+    (users, deps) => {
+      const lock = keypadLockOf(users, deps);
+      return lock ? (name: string, passcode: string) => addPasscode(lock, name, passcode) : undefined;
+    },
+    "Add a permanent keypad passcode for a new user.",
+  ),
 
   /** Read the current device-reported state; undefined means no settled locked/unlocked state. */
   refreshStatus: {

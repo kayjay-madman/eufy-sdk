@@ -59,6 +59,7 @@ await dev.arming?.()?.setMode(ArmingMode.home); // guard mode
 await dev.lock?.()?.lock?.();
 await dev.lock?.()?.setAutoLock?.(true, 60); // enable, 60s delay
 await dev.lock?.()?.setRainMode?.(true); // P2P video lock only — optional accessor
+await dev.lock?.()?.addPasscode?.("Guest", "13572468"); // keypad code — see Keypad passcodes below
 ```
 
 Argument constants (`PtzDirection`, `ArmingMode`, …) are exported from the package — pass the named
@@ -73,7 +74,8 @@ permanent-outdoor-light line: on/off/brightness/custom colour/effect — see the
 also on the classic Wi-Fi lock over its own keyed envelope, both directions hardware-confirmed, where
 `setAutoLock` is absent — optional accessor, `?.()`; lock/unlock and getAutoLockState on the FamiLock S3
 over secure MQTT, both directions hardware-confirmed, where the settings writes are absent; plus setRainMode on
-the video lock only), `siren` (volume, alarm duration, and test/stop triggers — see below),
+the video lock only, and [keypad passcodes](#keypad-passcodes) on the Smart Lock C33),
+`siren` (volume, alarm duration, and test/stop triggers — see below),
 and `smartDrop` (`openLid()` on a standalone SmartDrop T8790).
 
 > **Unverified writes are absent, they don't guess.** A write method present on a `dev.<cap>()` object
@@ -274,5 +276,22 @@ are unverified.
 
 Its camera serves live view, `live()` and `openReadable()`, and behind a HomeBase 3 the recordings the
 station holds, `downloadRecording()`. Stills, talkback and camera settings are absent on this family.
+
+## Keypad passcodes
+
+The Smart Lock C33 adds a keypad code for a new user with
+`lock().addPasscode(name, passcode)`, the way the app adds one: the cloud records the user, the lock stores
+the code under the user's short id, and the cloud records the code. It answers `{ shortUserId, passwordId }`.
+
+```ts
+const keypad = dev.lock?.();
+await keypad?.addPasscode?.("Guest", "13572468"); // permanent
+```
+
+A passcode or name the lock's frame cannot carry rejects before anything is sent. A later failure names the
+cloud user it leaves, and the code's password id once the lock has stored it. A lock refuses a passcode it
+already holds (device result 17); as with the app, the cloud user stays, holding no code.
+
+A permanent code is confirmed on the C33.
 
 Next: [Events](/events) · [Live media](/live-media).

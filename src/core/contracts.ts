@@ -1111,21 +1111,63 @@ export interface AutoLockSnapshot {
 }
 
 /**
- * The **`ff09` settings read boundary** — `GET_SETTINGS` is a request/reply query (like a
- * `MediaProvider` media op), not a passive property the device broadcasts, so it needs its own
- * request/reply primitive rather than reusing the write-only {@link CommandSink}. Named for the frame
- * family it reads, the same way the `ff09-*` {@link Command} kinds and {@link Ff09Identity} are: any
- * device driven by that frame can grow a reader here, and the settings it exposes are the frame's, not
- * one capability's.
+ * A decrypted `ff09` reply: the leading status byte the device answers with, then its TLV fields keyed
+ * by tag (`0xa1`, `0xa2`, …). A reply numbers its own tags from `0xa1`, independently of the request's.
+ */
+export interface Ff09Reply {
+  /** The device's result for the command — `0` accepted, anything else refused. */
+  status: number;
+  /** Tag → field bytes, in the reply's own numbering. */
+  fields: ReadonlyMap<number, Buffer>;
+}
+
+/**
+ * The **`ff09` request/reply boundary** — `GET_SETTINGS` and the frames that answer with data are
+ * request/reply exchanges (like a `MediaProvider` media op), not passive properties the device
+ * broadcasts, so they need their own request/reply primitive rather than the write-only
+ * {@link CommandSink}. Named for the frame family it speaks, the same way the `ff09-*` {@link Command}
+ * kinds and {@link Ff09Identity} are: any device driven by that frame can grow a method here, and what it
+ * reads is the frame's, not one capability's.
  *
  * Bound to one device serial (transport picked internally, P2P or MQTT, same as `CommandSink`), so the
  * methods take no identity args. Optional because an unbound model has no live client, and because only
  * `ff09`-family devices have one at all.
- *
- * One method today. A further `ff09` setting that needs a live read is another method here — not
- * another injected provider.
  */
 export interface Ff09SettingsReader {
   /** Read the device's current auto-lock settings via a live `GET_SETTINGS` round-trip. */
   getAutoLockState(): Promise<AutoLockSnapshot>;
+  /**
+   * Send one `ff09` command and answer the device's decrypted reply. The frame carries the freshness
+   * stamp and the owner's account id as its first two fields (`0xa1`, `0xa2`); `fields` follow from
+   * `0xa3` in the order given. `commandCode` is the frame opcode and `apiCommand` the envelope's.
+   *
+   * Rejects when no reply arrives; a reply whose status refuses the command resolves, carrying that
+   * status. Goes over secure MQTT.
+   */
+  exchange?(commandCode: number, apiCommand: number, fields: readonly Buffer[]): Promise<Ff09Reply>;
+}
+
+/**
+ * The cloud's record of a device's **local users** — the people the device itself admits (a keypad
+ * code's holder), listed per device beside the account members and created before the device is told
+ * about them. Bound to one device serial, so the methods take no identity args.
+ */
+export interface DeviceUserDirectory {
+  /** Create a local-user record named `nickName`; answers the 4-hex-digit short id the cloud assigned it. */
+  addUser(nickName: string): Promise<{ shortUserId: string }>;
+  /**
+   * Record a password the device has stored under the local user `shortUserId`. The cloud keeps
+   * `schedule` as the opaque string it is given, and lists the password under the user once recorded.
+   */
+  savePassword(shortUserId: string, password: DeviceUserPassword): Promise<void>;
+}
+
+/** One password as the cloud records it under a device's local user. */
+export interface DeviceUserPassword {
+  /** The 4-hex-digit id the device answered when it stored the password. */
+  passwordId: string;
+  /** What the password is — the cloud's own numbering (`1` a keypad code). */
+  passwordType: number;
+  /** When the password admits its holder, as the JSON string the cloud stores verbatim. */
+  schedule: string;
 }
