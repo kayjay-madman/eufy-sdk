@@ -164,16 +164,17 @@ function nativeReport(signal: InboundSignal): Record<string, unknown> | undefine
 }
 
 /**
- * The keypad-user wire on the Smart Lock C33 and C30, as the vendor app drives it: the `ff09` opcode that
- * adds a code, and the envelope `apiCommand` the app sends every command to these locks under.
+ * The keypad-user wire on the Smart Lock C33, C30 and FamiLock S3, as the vendor app drives it: the `ff09`
+ * opcode that adds a code, and the envelope `apiCommand` the app sends every command to these locks under.
  */
 const PASSCODE_WIRE = { ADD: 0x24, API_COMMAND: 6012 } as const;
 
 /** The most bytes one field of an `ff09` frame carries: a field's length is a single byte. */
 const MAX_FIELD_BYTES = 0xff;
 
-/** The models whose keypad users are added here: Smart Lock C33 and C30. */
-const keepsKeypadUsers = (ctx: CommandContext): boolean => isSmartLockC33(ctx) || isSmartLockC30(ctx);
+/** The models whose keypad users are added here: Smart Lock C33, C30 and FamiLock S3. */
+const keepsKeypadUsers = (ctx: CommandContext): boolean =>
+  isSmartLockC33(ctx) || isSmartLockC30(ctx) || isFamiLockS3(ctx);
 
 /**
  * When a keypad code admits its holder, on the lock's own clock; a code added without one is permanent.
@@ -281,6 +282,14 @@ const UNBOUNDED_SCHEDULE = JSON.stringify({
   timePeriods: [{ periodic: 127, startTime: "0:0", endTime: "-1:-1" }],
 });
 
+/** What a model's cloud schedule is spelled from: a code's frame window, its validity and the lock's clock. */
+interface ScheduleSource {
+  window: PasscodeWindow;
+  validity: PasscodeValidity | undefined;
+  /** The lock's clock zone, as its station reports it. */
+  tz: string | undefined;
+}
+
 /** A time of day as a Time Span's cloud record spells it, `HH:MM`. */
 const hhmm = (t: WallClockTime) => `${String(t.hour).padStart(2, "0")}:${String(t.minute).padStart(2, "0")}`;
 
@@ -290,7 +299,7 @@ const hhmm = (t: WallClockTime) => `${String(t.hour).padStart(2, "0")}:${String(
  * clock `tz`, and one time period, `periodic` 255 with its two times as `HH:MM`. A permanent code
  * carries {@link UNBOUNDED_SCHEDULE}. Throws on a lock clock `tz` this cannot evaluate.
  */
-function smartLockSchedule(validity: PasscodeValidity | undefined, tz: string | undefined): string {
+function smartLockSchedule({ validity, tz }: ScheduleSource): string {
   if (!validity) return UNBOUNDED_SCHEDULE;
   const { starts, ends } = validity;
   return JSON.stringify({
@@ -300,6 +309,34 @@ function smartLockSchedule(validity: PasscodeValidity | undefined, tz: string | 
     timePeriods: [{ periodic: 255, startTime: hhmm(starts), endTime: hhmm(ends) }],
   });
 }
+
+/**
+ * A window as the FamiLock S3's cloud record spells it: the frame's dates, weekday byte and times as
+ * upper-case hex, the weekday byte with its top bit set — the app records `FF` for a permanent code,
+ * whose frame carries `7f`.
+ */
+function famiLockSchedule({ window }: ScheduleSource): string {
+  const hex = (b: Buffer) => b.toString("hex").toUpperCase();
+  return JSON.stringify({
+    startDay: hex(window.startDate),
+    endDay: hex(window.endDate),
+    week: hex(Buffer.from([window.week | 0x80])),
+    startTime: hex(window.startTime),
+    endTime: hex(window.endTime),
+  });
+}
+
+/** How a model spells a code where the models that take the add-passcode frame differ. */
+interface PasscodeDialect {
+  /** The schedule the model's cloud record stores for a code, the JSON string verbatim. */
+  schedule(code: ScheduleSource): string;
+}
+
+/** The Smart Lock C33's spelling, which the C30 shares. */
+const SMART_LOCK_DIALECT: PasscodeDialect = { schedule: smartLockSchedule };
+
+/** The FamiLock S3's spelling: its cloud record is {@link famiLockSchedule}. */
+const FAMILOCK_DIALECT: PasscodeDialect = { schedule: famiLockSchedule };
 
 /** The window `validity` asks for; permanent without one. Throws on a kind it does not know. */
 function windowOf(validity: PasscodeValidity | undefined): PasscodeWindow {
@@ -317,7 +354,7 @@ function windowOf(validity: PasscodeValidity | undefined): PasscodeWindow {
  * The fields of the add-passcode frame after its time and account id (`A3`…`AD`): the code as ASCII
  * digits, user type `4` (a keypad user), the window's dates, weekdays and times, the single-use field `0`,
  * the name, the user's short id as two bytes, and the window's validity. Byte-for-byte the frame the app
- * sends to add a code to a C33 or a C30.
+ * sends to add a code to a C33, a C30 or an S3.
  */
 function passcodeFields(passcode: string, name: string, shortUserId: string, window: PasscodeWindow): Buffer[] {
   return [
@@ -335,12 +372,13 @@ function passcodeFields(passcode: string, name: string, shortUserId: string, win
   ];
 }
 
-/** A lock's keypad users as bound: their cloud records, the lock's `ff09` exchange and its clock. */
+/** A lock's keypad users as bound: their cloud records, the lock's `ff09` exchange, its clock and its model. */
 interface KeypadLock {
   users: DeviceUserDirectory;
   exchange: NonNullable<Ff09SettingsReader["exchange"]>;
   /** The lock's clock zone, as its station reports it. */
   tz: string | undefined;
+  dialect: PasscodeDialect;
 }
 
 /** The keypad binding of a model that keeps keypad users here, once its `ff09` exchange is bound. */
@@ -351,6 +389,7 @@ function keypadLockOf(users: DeviceUserDirectory, { ctx, ff09Settings }: MemberD
     users,
     exchange,
     tz: ctx.timezone,
+    dialect: isFamiLockS3(ctx) ? FAMILOCK_DIALECT : SMART_LOCK_DIALECT,
   };
 }
 
@@ -377,7 +416,7 @@ async function addPasscode(
     throw new Error(`lock.addPasscode: a passcode and a name are each at most ${MAX_FIELD_BYTES} bytes`);
   }
   const window = windowOf(validity);
-  const schedule = smartLockSchedule(validity, lock.tz);
+  const schedule = lock.dialect.schedule({ window, validity, tz: lock.tz });
   const { shortUserId } = await lock.users.addUser(name);
   const reply = await lock
     .exchange(PASSCODE_WIRE.ADD, PASSCODE_WIRE.API_COMMAND, passcodeFields(passcode, name, shortUserId, window))
@@ -640,7 +679,8 @@ export const LOCK_MEMBERS = {
   /**
    * Add a keypad code for a new user named `name` (see {@link addPasscode}): permanent, or within the time
    * span `validity` gives. Answers the user's short id and the code's password id, both as the
-   * 4-hex-digit strings the cloud's user list carries. Smart Lock C33 and C30, both kinds confirmed on each.
+   * 4-hex-digit strings the cloud's user list carries. Smart Lock C33, C30 and FamiLock S3, both kinds
+   * confirmed on all three.
    */
   addPasscode: provided(
     "deviceUsers",

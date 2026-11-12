@@ -1540,9 +1540,10 @@ export class EufyMega extends EventEmitter {
    *
    * It earns its own boundary because `GET_SETTINGS` is a request/reply query that neither
    * `CommandSink` (write-only) nor `MediaProvider.p2pQuery` (P2P-only, no decrypt) fits. `exchange` goes
-   * over secure MQTT, the wire the vendor app sends these commands on. Named for the frame family rather
-   * than the capability, so this facade stays capability-neutral like the layers below it — see
-   * `CapabilityModule.actions`'s doc before adding another.
+   * over secure MQTT, the wire the vendor app sends these commands on, including to a lock with a P2P
+   * endpoint. Named for the frame family rather than the capability, so this facade stays
+   * capability-neutral like the layers below it — see `CapabilityModule.actions`'s doc before adding
+   * another.
    */
   private ff09SettingsReaderFor(sn: string, ctx: CommandContext): Ff09SettingsReader | undefined {
     if (!ctx.adminUserId) return undefined;

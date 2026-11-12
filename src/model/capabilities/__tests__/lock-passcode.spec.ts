@@ -25,6 +25,16 @@ const c33: CommandContext = {
 /** The Smart Lock C30, which the app sends the same add-passcode frame over the same wire. */
 const c30: CommandContext = { ...c33, deviceType: 202, model: "T85D0", serial: "T85D0K0000000000" };
 
+/** The FamiLock S3: a camera-codec device with a P2P endpoint, taking the same frame over MQTT. */
+const s3: CommandContext = {
+  ...c33,
+  codec: "camera",
+  deviceType: 203,
+  model: "T85V0",
+  serial: "T85V0K0000000000",
+  hasP2p: true,
+};
+
 /** A video smart lock on another wire family; the passcode frame is unconfirmed there. */
 const videoLock: CommandContext = { ...c33, deviceType: 189, model: "T8531", serial: "T8531K0000000000" };
 
@@ -56,7 +66,7 @@ function fakes(answer: Ff09Reply = reply(0, [[0xa1, "0007"]])) {
 const lockOf = (ctx: CommandContext, deps: { users?: DeviceUserDirectory; ff09Settings?: Ff09SettingsReader }) =>
   bind<LockActions>("lock", ctx, { deviceUsers: deps.users, ff09Settings: deps.ff09Settings }).acts;
 
-describe("lock.addPasscode — Smart Lock C33 and C30", () => {
+describe("lock.addPasscode — Smart Lock C33, C30 and FamiLock S3", () => {
   it("creates the cloud user, sends the lock the permanent code under its short id, then records the password", async () => {
     const { users, ff09Settings, calls } = fakes();
 
@@ -181,6 +191,51 @@ describe("lock.addPasscode — Smart Lock C33 and C30", () => {
     });
   });
 
+  it("records an S3 code in the S3's cloud form: the frame's dates and times as hex, week FF", async () => {
+    const permanent = fakes();
+    await lockOf(s3, permanent).addPasscode!("Guest", "66554433");
+    const frame = vi.mocked(permanent.ff09Settings.exchange!).mock.calls[0]![2].map((f) => f.toString("hex"));
+    expect(frame.slice(2, 7)).toEqual(["00000000", "ffffffff", "7f", "0000", "ffff"]);
+    expect(permanent.users.savePassword).toHaveBeenCalledWith("0007", {
+      passwordId: "0007",
+      passwordType: 1,
+      schedule: JSON.stringify({
+        startDay: "00000000",
+        endDay: "FFFFFFFF",
+        week: "FF",
+        startTime: "0000",
+        endTime: "FFFF",
+      }),
+    });
+
+    const span = fakes();
+    await lockOf(s3, span).addPasscode!("Guest", "11223344", {
+      kind: "timeSpan",
+      starts: { year: 2026, month: 11, day: 10, hour: 10, minute: 0 },
+      ends: { year: 2026, month: 12, day: 10, hour: 9, minute: 0 },
+    });
+    const spanFrame = vi.mocked(span.ff09Settings.exchange!).mock.calls[0]![2].map((f) => f.toString("hex"));
+    expect(spanFrame.slice(2, 7)).toEqual(["ea070b0a", "ea070c0a", "ff", "0a00", "0900"]);
+    expect(vi.mocked(span.users.savePassword).mock.calls[0]![1].schedule).toBe(
+      JSON.stringify({ startDay: "EA070B0A", endDay: "EA070C0A", week: "FF", startTime: "0A00", endTime: "0900" }),
+    );
+  });
+
+  it("adds an S3 time span without the lock's clock zone, which its cloud record does not use", async () => {
+    const { users, ff09Settings } = fakes();
+    const at = (day: number, hour: number) => ({ year: 2026, month: 11, day, hour, minute: 0 });
+
+    await lockOf({ ...s3, timezone: undefined }, { users, ff09Settings }).addPasscode!("Guest", "1234", {
+      kind: "timeSpan",
+      starts: at(10, 10),
+      ends: at(11, 9),
+    });
+
+    expect(vi.mocked(users.savePassword).mock.calls[0]![1].schedule).toBe(
+      JSON.stringify({ startDay: "EA070B0A", endDay: "EA070B0B", week: "FF", startTime: "0A00", endTime: "0900" }),
+    );
+  });
+
   it("refuses a time span it cannot spell before touching the cloud", async () => {
     const at = (day: number, hour = 9, minute = 0, second?: number) => ({
       year: 2026,
@@ -212,12 +267,13 @@ describe("lock.addPasscode — Smart Lock C33 and C30", () => {
     }
   });
 
-  it("is present on the C33 and C30, absent off them, and without either provider or the exchange", () => {
+  it("is present on the C33, C30 and S3, absent off them, and without either provider or the exchange", () => {
     const { users, ff09Settings } = fakes();
     const { exchange: _dropped, ...noExchange } = ff09Settings;
 
     expect("addPasscode" in lockOf(c33, { users, ff09Settings })).toBe(true);
     expect("addPasscode" in lockOf(c30, { users, ff09Settings })).toBe(true);
+    expect("addPasscode" in lockOf(s3, { users, ff09Settings })).toBe(true);
     expect("addPasscode" in lockOf(videoLock, { users, ff09Settings })).toBe(false);
     expect("addPasscode" in lockOf(c33, { ff09Settings })).toBe(false);
     expect("addPasscode" in lockOf(c33, { users })).toBe(false);
