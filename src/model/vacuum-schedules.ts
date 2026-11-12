@@ -15,27 +15,12 @@
  * @module model/vacuum-schedules
  */
 import type { RawDpCodec, RawDpField } from "../core/contracts.js";
+import { WEEKDAYS, type Weekday } from "./weekdays.js";
 import { each, flag, int, sub, text } from "./proto-read.js";
 
 /** What a timer runs when it fires, as the vendor's `Action` oneof names it. */
 export const VACUUM_SCHEDULE_ACTIONS = ["autoClean", "roomsClean", "cruise", "sceneClean"] as const;
 export type VacuumScheduleAction = (typeof VACUUM_SCHEDULE_ACTIONS)[number];
-
-/**
- * Weekdays in the vendor's own bit order — Sunday first, because `Cycle.week_bits` puts it at bit 0.
- *
- * Written out rather than derived from a locale so the mapping is the wire's and not the reader's.
- */
-export const VACUUM_SCHEDULE_WEEKDAYS = [
-  "sunday",
-  "monday",
-  "tuesday",
-  "wednesday",
-  "thursday",
-  "friday",
-  "saturday",
-] as const;
-export type VacuumScheduleWeekday = (typeof VACUUM_SCHEDULE_WEEKDAYS)[number];
 
 /** One schedule the robot holds. */
 export interface VacuumSchedule {
@@ -58,7 +43,7 @@ export interface VacuumSchedule {
    * The days a repeating timer fires on. Empty for a one-shot timer, and empty for a repeating one
    * whose `week_bits` is zero — which the device treats as a timer that never fires.
    */
-  readonly weekdays: readonly VacuumScheduleWeekday[];
+  readonly weekdays: readonly Weekday[];
   /**
    * The offset from UTC the timer's clock was set against, in seconds east.
    *
@@ -121,8 +106,8 @@ const SCENE_FIELD = { SCENE_ID: 1, SCENE_NAME: 2 } as const;
 const TRIGGER_CYCLE = 1;
 
 /** Expand a `Cycle.week_bits` mask to the days it names, in the vendor's Sunday-first bit order. */
-function weekdaysOf(bits: number): readonly VacuumScheduleWeekday[] {
-  return VACUUM_SCHEDULE_WEEKDAYS.filter((_, i) => (bits & (1 << i)) !== 0);
+function weekdaysOf(bits: number): readonly Weekday[] {
+  return WEEKDAYS.filter((_, i) => (bits & (1 << i)) !== 0);
 }
 
 /** Read the room ids out of whichever of `General` / `Custom` the device populated. */

@@ -27,11 +27,10 @@ export {
   decodeVacuumScheduleCount,
   decodeActiveVacuumScheduleCount,
   VACUUM_SCHEDULE_ACTIONS,
-  VACUUM_SCHEDULE_WEEKDAYS,
   type VacuumSchedule,
   type VacuumScheduleAction,
-  type VacuumScheduleWeekday,
 } from "./vacuum-schedules.js";
+export { WEEKDAYS, type Weekday } from "./weekdays.js";
 export {
   decodeVacuumScenes,
   decodeVacuumSceneCount,
