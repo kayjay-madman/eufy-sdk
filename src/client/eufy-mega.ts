@@ -1569,6 +1569,7 @@ export class EufyMega extends EventEmitter {
     return {
       addUser: (nickName) => this.mega.addDeviceLocalUser(sn, stationSn, nickName),
       savePassword: (shortUserId, password) => this.mega.saveDevicePassword(sn, stationSn, shortUserId, password),
+      deleteUser: (shortUserId) => this.mega.deleteDeviceLocalUser(sn, stationSn, shortUserId),
     };
   }
 

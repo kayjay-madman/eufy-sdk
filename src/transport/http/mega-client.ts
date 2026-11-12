@@ -1140,6 +1140,20 @@ export class MegaHttpClient {
   }
 
   /**
+   * Remove one of a device's local users — `POST /v3/app/device/user/delete` on the security-app host,
+   * the call the vendor app makes once a lock has deleted the user. The cloud drops the user and the
+   * passwords recorded under it. `stationSn` is as {@link addDeviceLocalUser} takes it. Rejects on a
+   * non-zero envelope code.
+   */
+  async deleteDeviceLocalUser(deviceSn: string, stationSn: string, shortUserId: string): Promise<void> {
+    await this.securityAppPost("/v3/app/device/user/delete", {
+      device_sn: deviceSn,
+      short_user_ids: [shortUserId],
+      station_sn: stationSn,
+    });
+  }
+
+  /**
    * List the account's enrolled AI faces (the recognition roster). Each entry is keyed by `ai_user_id` —
    * the id an `IDENTITY_PERSON_DETECTION` push carries as `person_id` — so this is the lookup table for
    * naming a recognised person. Endpoint: `/v3/aiassis/get_faces` on the security-app host.

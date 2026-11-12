@@ -165,14 +165,15 @@ function nativeReport(signal: InboundSignal): Record<string, unknown> | undefine
 
 /**
  * The keypad-user wire on the Smart Lock C33, C30 and FamiLock S3, as the vendor app drives it: the `ff09`
- * opcode that adds a code, and the envelope `apiCommand` the app sends every command to these locks under.
+ * opcodes that add a code and delete a user, and the envelope `apiCommand` the app sends every command to
+ * these locks under.
  */
-const PASSCODE_WIRE = { ADD: 0x24, API_COMMAND: 6012 } as const;
+const PASSCODE_WIRE = { ADD: 0x24, DELETE_USER: 0x2d, API_COMMAND: 6012 } as const;
 
 /** The most bytes one field of an `ff09` frame carries: a field's length is a single byte. */
 const MAX_FIELD_BYTES = 0xff;
 
-/** The models whose keypad users are added here: Smart Lock C33, C30 and FamiLock S3. */
+/** The models whose keypad users are added and deleted here: Smart Lock C33, C30 and FamiLock S3. */
 const keepsKeypadUsers = (ctx: CommandContext): boolean =>
   isSmartLockC33(ctx) || isSmartLockC30(ctx) || isFamiLockS3(ctx);
 
@@ -379,6 +380,8 @@ interface KeypadLock {
   /** The lock's clock zone, as its station reports it. */
   tz: string | undefined;
   dialect: PasscodeDialect;
+  /** The acting account's own short id, which {@link deleteUser} refuses. */
+  ownShortUserId: string | undefined;
 }
 
 /** The keypad binding of a model that keeps keypad users here, once its `ff09` exchange is bound. */
@@ -390,6 +393,7 @@ function keypadLockOf(users: DeviceUserDirectory, { ctx, ff09Settings }: MemberD
     exchange,
     tz: ctx.timezone,
     dialect: isFamiLockS3(ctx) ? FAMILOCK_DIALECT : SMART_LOCK_DIALECT,
+    ownShortUserId: ctx.shortUserId,
   };
 }
 
@@ -441,6 +445,24 @@ async function addPasscode(
       );
     });
   return added;
+}
+
+/**
+ * Delete a keypad user the way the vendor app does: tell the lock to drop the user `shortUserId` and
+ * every credential stored under it, which it answers with status `0`; then remove the user's cloud
+ * record, its passwords with it. A lock refusal rejects with its status before the cloud is touched.
+ * Refuses a short id that is not 4 hex digits, and the acting account's own.
+ */
+async function deleteUser(lock: KeypadLock, shortUserId: string): Promise<void> {
+  if (!/^[0-9a-fA-F]{4}$/.test(shortUserId)) throw new Error("lock.deleteUser: a short id is 4 hex digits");
+  if (shortUserId.toLowerCase() === lock.ownShortUserId?.toLowerCase()) {
+    throw new Error("lock.deleteUser: refusing to delete the account's own user");
+  }
+  const reply = await lock.exchange(PASSCODE_WIRE.DELETE_USER, PASSCODE_WIRE.API_COMMAND, [
+    Buffer.from(shortUserId, "hex"),
+  ]);
+  if (reply.status !== 0) throw new Error(`lock.deleteUser: device result ${reply.status}`);
+  await lock.users.deleteUser(shortUserId);
 }
 
 /**
@@ -691,6 +713,20 @@ export const LOCK_MEMBERS = {
         : undefined;
     },
     "Add a keypad passcode for a new user: permanent, or within a time span.",
+  ),
+
+  /**
+   * Delete the keypad user `shortUserId` (see {@link deleteUser}) from the lock and the cloud, with every
+   * code stored under it. `shortUserId` is the 4-hex-digit id {@link addPasscode} answers and the cloud's
+   * user list carries. Smart Lock C33, C30 and FamiLock S3, confirmed on each.
+   */
+  deleteUser: provided(
+    "deviceUsers",
+    (users, deps) => {
+      const lock = keypadLockOf(users, deps);
+      return lock ? (shortUserId: string) => deleteUser(lock, shortUserId) : undefined;
+    },
+    "Delete a keypad user and every code stored under it.",
   ),
 
   /**
