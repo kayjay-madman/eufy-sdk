@@ -200,6 +200,9 @@ export const isSmartLockC33 = (ctx: FamilyContext): boolean => ctx.deviceType ==
 /** Smart Lock C30 (T85D0), identified by its distinct cloud device type. */
 export const isSmartLockC30 = (ctx: FamilyContext): boolean => ctx.deviceType === DeviceType.LOCK_85D0;
 
+/** Smart Lock C220 (T8506), identified by its distinct cloud device type. */
+export const isSmartLockC220 = (ctx: FamilyContext): boolean => ctx.deviceType === DeviceType.LOCK_8506;
+
 /**
  * The classic Wi-Fi smart lock — the unit whose actuation rides a per-command ECDH-wrapped key rather than
  * the shared `ff09` frame: DeviceType 51 with a serial in the `T8520` range whose seventh character is `2`,

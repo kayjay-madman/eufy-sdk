@@ -73,8 +73,8 @@ permanent-outdoor-light line: on/off/brightness/custom colour/effect — see the
 `arming`, `lock` (lock/unlock/setAutoLock on both the P2P video lock and the MQTT garage door; lock/unlock
 also on the classic Wi-Fi lock over its own keyed envelope, both directions hardware-confirmed, where
 `setAutoLock` is absent — optional accessor, `?.()`; plus setRainMode on the video lock only, and
-[keypad passcodes](#keypad-passcodes) on the Smart Lock C33, C30 and FamiLock S3; `unlock()` alone opens a
-standalone SmartDrop lid), and `siren` (volume, alarm duration, and test/stop triggers — see below).
+[keypad passcodes](#keypad-passcodes) on the Smart Lock C33, C30, C220 and FamiLock S3; `unlock()` alone opens
+a standalone SmartDrop lid), and `siren` (volume, alarm duration, and test/stop triggers — see below).
 
 > **Unverified writes are absent, they don't guess.** A write method present on a `dev.<cap>()` object
 > means its wire is verified — so you know at compile time what's settable. Where a write isn't yet
@@ -278,7 +278,7 @@ station holds, `downloadRecording()`. Stills, talkback and camera settings are a
 
 ## Keypad passcodes
 
-The Smart Lock C33, C30 and FamiLock S3 add a keypad code for a new user with
+The Smart Lock C33, C30, C220 and FamiLock S3 add a keypad code for a new user with
 `lock().addPasscode(name, passcode, validity?)`, the way the app adds one: the cloud records the user, the
 lock stores the code under the user's short id, and the cloud records the code and when it admits. It answers
 `{ shortUserId, passwordId }`. `changePasscode(shortUserId, passcode)` changes a user's code and keeps its
@@ -310,6 +310,6 @@ leaves, and the code's password id once the lock has stored it. A lock refuses a
 (device result 17); as with the app, the cloud user stays, holding no code. `changePasscode` and `deleteUser`
 refuse the account's own user.
 
-Each kind of code is confirmed on all three models.
+Each kind of code is confirmed on all four models.
 
 Next: [Events](/events) · [Live media](/live-media).
