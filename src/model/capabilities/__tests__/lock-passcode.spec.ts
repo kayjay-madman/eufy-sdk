@@ -421,6 +421,48 @@ describe("lock.addPasscode — Smart Lock C33, C30 and FamiLock S3", () => {
   });
 });
 
+describe("lock.changePasscode", () => {
+  it("sends the lock the user's id and the new code, and touches no cloud record", async () => {
+    const { users, ff09Settings, calls } = fakes(reply(0));
+
+    await lockOf(c33, { users, ff09Settings }).changePasscode!("0007", "24681357");
+
+    expect(calls).toEqual(["exchange"]);
+    const [code, apiCommand, fields] = vi.mocked(ff09Settings.exchange!).mock.calls[0]!;
+    expect([code, apiCommand]).toEqual([0x26, 6012]);
+    expect(fields.map((f) => f.toString("hex"))).toEqual(["0007", Buffer.from("24681357", "ascii").toString("hex")]);
+  });
+
+  it("rejects with the lock's status on a refusal", async () => {
+    const { users, ff09Settings } = fakes(reply(1));
+
+    await expect(lockOf(c33, { users, ff09Settings }).changePasscode!("0007", "24681357")).rejects.toThrow(
+      /device result 1/,
+    );
+  });
+
+  it("refuses a malformed short id or passcode, and the account's own user, before touching the lock", async () => {
+    const { users, ff09Settings } = fakes(reply(0));
+    const lock = lockOf(c33, { users, ff09Settings });
+
+    await expect(lock.changePasscode!("7", "1234")).rejects.toThrow(/4 hex digits/);
+    await expect(lock.changePasscode!("0000", "1234")).rejects.toThrow(/account's own user/);
+    await expect(lock.changePasscode!("0007", "12a4")).rejects.toThrow(/digits only/);
+    await expect(lock.changePasscode!("0007", "1".repeat(256))).rejects.toThrow(/at most 255 bytes/);
+    expect(ff09Settings.exchange).not.toHaveBeenCalled();
+  });
+
+  it("is present where addPasscode is, and absent off those models", () => {
+    const { users, ff09Settings } = fakes();
+
+    for (const ctx of [c33, c30, s3]) {
+      expect("changePasscode" in lockOf(ctx, { users, ff09Settings })).toBe(true);
+    }
+    expect("changePasscode" in lockOf(videoLock, { users, ff09Settings })).toBe(false);
+    expect("changePasscode" in lockOf(c33, { ff09Settings })).toBe(false);
+  });
+});
+
 describe("lock.deleteUser", () => {
   it("tells the lock to delete the user under its short id, then removes the cloud user", async () => {
     const { users, ff09Settings, calls } = fakes(reply(0));
@@ -466,5 +508,9 @@ const _signature: Exact<
   NonNullable<typeof lk.addPasscode>,
   (name: string, passcode: string, validity?: PasscodeValidity) => Promise<{ shortUserId: string; passwordId: string }>
 > = true;
+const _changeSignature: Exact<
+  NonNullable<typeof lk.changePasscode>,
+  (shortUserId: string, passcode: string) => Promise<void>
+> = true;
 const _deleteSignature: Exact<NonNullable<typeof lk.deleteUser>, (shortUserId: string) => Promise<void>> = true;
-export const _surfaceAssertions = [_optional, _signature, _deleteSignature];
+export const _surfaceAssertions = [_optional, _signature, _changeSignature, _deleteSignature];

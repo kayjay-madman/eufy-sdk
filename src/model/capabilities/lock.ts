@@ -166,10 +166,10 @@ function nativeReport(signal: InboundSignal): Record<string, unknown> | undefine
 
 /**
  * The keypad-user wire on the Smart Lock C33, C30 and FamiLock S3, as the vendor app drives it: the `ff09`
- * opcodes that add a code and delete a user, and the envelope `apiCommand` the app sends every command to
- * these locks under.
+ * opcodes that add a code, change it and delete a user, and the envelope `apiCommand` the app sends every
+ * command to these locks under.
  */
-const PASSCODE_WIRE = { ADD: 0x24, DELETE_USER: 0x2d, API_COMMAND: 6012 } as const;
+const PASSCODE_WIRE = { ADD: 0x24, CHANGE: 0x26, DELETE_USER: 0x2d, API_COMMAND: 6012 } as const;
 
 /** The most bytes one field of an `ff09` frame carries: a field's length is a single byte. */
 const MAX_FIELD_BYTES = 0xff;
@@ -464,7 +464,7 @@ interface KeypadLock {
   /** The lock's clock zone, as its station reports it. */
   tz: string | undefined;
   dialect: PasscodeDialect;
-  /** The acting account's own short id, which {@link deleteUser} refuses. */
+  /** The acting account's own short id, which {@link changePasscode} and {@link deleteUser} refuse. */
   ownShortUserId: string | undefined;
 }
 
@@ -479,6 +479,22 @@ function keypadLockOf(users: DeviceUserDirectory, { ctx, ff09Settings }: MemberD
     dialect: isFamiLockS3(ctx) ? FAMILOCK_DIALECT : SMART_LOCK_DIALECT,
     ownShortUserId: ctx.shortUserId,
   };
+}
+
+/** Refuse, naming `method`, a passcode the frame cannot carry: not digits, or longer than a field. */
+function checkPasscode(method: string, passcode: string): void {
+  if (!/^\d+$/.test(passcode)) throw new Error(`lock.${method}: a passcode is digits only`);
+  if (passcode.length > MAX_FIELD_BYTES) {
+    throw new Error(`lock.${method}: a passcode is at most ${MAX_FIELD_BYTES} bytes`);
+  }
+}
+
+/** Refuse, naming `method`, a short id that is not 4 hex digits, and the acting account's own. */
+function checkKeypadUser(method: string, lock: KeypadLock, shortUserId: string): void {
+  if (!/^[0-9a-fA-F]{4}$/.test(shortUserId)) throw new Error(`lock.${method}: a short id is 4 hex digits`);
+  if (shortUserId.toLowerCase() === lock.ownShortUserId?.toLowerCase()) {
+    throw new Error(`lock.${method}: refusing the account's own user`);
+  }
 }
 
 /**
@@ -499,9 +515,9 @@ async function addPasscode(
   passcode: string,
   validity?: PasscodeValidity,
 ): Promise<{ shortUserId: string; passwordId: string }> {
-  if (!/^\d+$/.test(passcode)) throw new Error("lock.addPasscode: a passcode is digits only");
-  if (passcode.length > MAX_FIELD_BYTES || Buffer.byteLength(name, "utf8") > MAX_FIELD_BYTES) {
-    throw new Error(`lock.addPasscode: a passcode and a name are each at most ${MAX_FIELD_BYTES} bytes`);
+  checkPasscode("addPasscode", passcode);
+  if (Buffer.byteLength(name, "utf8") > MAX_FIELD_BYTES) {
+    throw new Error(`lock.addPasscode: a name is at most ${MAX_FIELD_BYTES} bytes`);
   }
   const window = windowOf(validity, lock.tz, lock.dialect);
   const schedule = lock.dialect.schedule({ window, validity, tz: lock.tz });
@@ -532,16 +548,30 @@ async function addPasscode(
 }
 
 /**
+ * Change the code of the keypad user `shortUserId` the way the vendor app does: one frame carrying the
+ * user's id and the new code, which the lock answers with status `0`. The code keeps its schedule, and
+ * the cloud record is left as it is — it holds the code's id and schedule, never the code. A malformed
+ * short id or passcode, and the acting account's own user, are refused before anything is sent; a lock
+ * refusal rejects with its status.
+ */
+async function changePasscode(lock: KeypadLock, shortUserId: string, passcode: string): Promise<void> {
+  checkKeypadUser("changePasscode", lock, shortUserId);
+  checkPasscode("changePasscode", passcode);
+  const reply = await lock.exchange(PASSCODE_WIRE.CHANGE, PASSCODE_WIRE.API_COMMAND, [
+    Buffer.from(shortUserId, "hex"),
+    Buffer.from(passcode, "ascii"),
+  ]);
+  if (reply.status !== 0) throw new Error(`lock.changePasscode: device result ${reply.status}`);
+}
+
+/**
  * Delete a keypad user the way the vendor app does: tell the lock to drop the user `shortUserId` and
  * every credential stored under it, which it answers with status `0`; then remove the user's cloud
  * record, its passwords with it. A lock refusal rejects with its status before the cloud is touched.
  * Refuses a short id that is not 4 hex digits, and the acting account's own.
  */
 async function deleteUser(lock: KeypadLock, shortUserId: string): Promise<void> {
-  if (!/^[0-9a-fA-F]{4}$/.test(shortUserId)) throw new Error("lock.deleteUser: a short id is 4 hex digits");
-  if (shortUserId.toLowerCase() === lock.ownShortUserId?.toLowerCase()) {
-    throw new Error("lock.deleteUser: refusing to delete the account's own user");
-  }
+  checkKeypadUser("deleteUser", lock, shortUserId);
   const reply = await lock.exchange(PASSCODE_WIRE.DELETE_USER, PASSCODE_WIRE.API_COMMAND, [
     Buffer.from(shortUserId, "hex"),
   ]);
@@ -797,6 +827,19 @@ export const LOCK_MEMBERS = {
         : undefined;
     },
     "Add a keypad passcode for a new user: permanent, within a time span, on chosen weekdays, or once.",
+  ),
+
+  /**
+   * Change the code of the keypad user `shortUserId` (see {@link changePasscode}) to `passcode`, keeping
+   * its schedule. Smart Lock C33, C30 and FamiLock S3, confirmed on each.
+   */
+  changePasscode: provided(
+    "deviceUsers",
+    (users, deps) => {
+      const lock = keypadLockOf(users, deps);
+      return lock ? (shortUserId: string, passcode: string) => changePasscode(lock, shortUserId, passcode) : undefined;
+    },
+    "Change a keypad user's passcode, keeping its schedule.",
   ),
 
   /**
