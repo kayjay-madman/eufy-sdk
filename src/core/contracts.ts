@@ -1142,7 +1142,8 @@ export interface Ff09SettingsReader {
    * `0xa3` in the order given. `commandCode` is the frame opcode and `apiCommand` the envelope's.
    *
    * Rejects when no reply arrives; a reply whose status refuses the command resolves, carrying that
-   * status. Goes over secure MQTT.
+   * status. Goes over secure MQTT, or over the device's own P2P session where the security cluster denies
+   * the device's topics.
    */
   exchange?(commandCode: number, apiCommand: number, fields: readonly Buffer[]): Promise<Ff09Reply>;
 }

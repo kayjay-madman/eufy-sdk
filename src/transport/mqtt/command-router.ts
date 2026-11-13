@@ -45,7 +45,7 @@ import {
   type Ff09FrameInput,
   type Ff09TransferPayload,
 } from "../ff09.js";
-import { SecureMqtt, type SecureMqttCredentials } from "./secure-mqtt.js";
+import { DeviceTopicsDeniedError, SecureMqtt, type SecureMqttCredentials } from "./secure-mqtt.js";
 import { secureTopic } from "./topics.js";
 import { buildAppShapedClientId, mqttUuidFrom } from "./app-client-id.js";
 import { discoverReachableInstance } from "./broker-discovery.js";
@@ -358,7 +358,9 @@ export class MqttCommandRouter {
    * `transport/mqtt/broker-discovery.ts`), for the caller to publish on.
    *
    * The `security-mqtt-{region}` cluster is probed first, and the `aiot-mqtt-{region}` endpoint with
-   * {@link KNOWN_AIOT_BROKER_IPS} when no security instance grants.
+   * {@link KNOWN_AIOT_BROKER_IPS} when no security instance grants. A device with its own P2P endpoint that
+   * every security instance refuses with a SUBACK deny rejects with {@link DeviceTopicsDeniedError} instead,
+   * for the facade to take that endpoint.
    *
    * Which cert is used does NOT change the outcome — the account's own `get_user_mqtt_info` cert and a
    * cert extracted from a real phone's keystore produce the identical grant/deny pattern across every
@@ -403,6 +405,10 @@ export class MqttCommandRouter {
       );
     let results = await probe(creds);
     if (!results.some((r) => r.granted)) {
+      const denied = results.length > 0 && results.every((r) => (r.grantedQos ?? 0) >= 0x80);
+      if (denied && typeof dev.p2pDid === "string" && dev.p2pDid.length > 0) {
+        throw new DeviceTopicsDeniedError(dev.sn, "eufy_security", [secureTopic(dev, "res")]);
+      }
       creds = account;
       results = await probe(account, MqttCommandRouter.KNOWN_AIOT_BROKER_IPS);
     }
