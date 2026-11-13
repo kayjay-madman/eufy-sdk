@@ -15,6 +15,7 @@ import type { EufyDevice } from "../../core/types.js";
 import type {
   Command,
   Ff09Identity,
+  Ff09Reply,
   AutoLockSnapshot,
   MediaProvider,
   RecordingDownload,
@@ -47,15 +48,19 @@ import { buildDirectBinaryBody } from "./write-commands.js";
 import { CommandType } from "./commands.js";
 import {
   buildFf09Frame,
+  buildFf09CommandFrame,
   buildFf09QueryFrame,
   buildFf09SettingToggleFrame,
   buildFf09AutolockSetFrame,
   decryptFf09Frame,
   parseFf09SettingsResponse,
   decodeFf09AutoLockSnapshot,
+  ff09FrameCode,
   ff09ReplyKeyTime,
   ff09TransferPayload,
   CMD_TRANSFER_PAYLOAD,
+  type Ff09CommandFrameInput,
+  type Ff09Frame,
 } from "../ff09.js";
 import { decodeP2PCloudIPs } from "./codec.js";
 import { P2P_ENVELOPE } from "./envelope.js";
@@ -2209,7 +2214,7 @@ export class P2PCommandRouter {
     const resolved = await this.resolveSession(sn, { waitLevel2: true });
 
     // ── 1. GET current settings, matched back by keyTime (shared with getAutoLockState — see helper). ──
-    const getReply = await this.fetchFf09SettingsGetReply(sn, cmd, resolved);
+    const getReply = await this.awaitFf09Reply(sn, buildFf09QueryFrame(cmd), resolved, "settings GET");
 
     // ── 2+3. Decrypt the reply, preserve A7/A8 + delay, build the SET frame (shared with the MQTT
     //         sibling — see buildFf09AutolockSetFrame), then send it fire-and-forget. ──────────────
@@ -2232,30 +2237,33 @@ export class P2PCommandRouter {
   }
 
   /**
-   * Shared GET-and-wait step behind both {@link sendFf09Autolock} (which reads to preserve A7/A8 across
-   * a write) and {@link getAutoLockState} (which reads for its own sake) — extracted so the two don't
-   * drift on the arm-before-send / listener-leak / keyTime-matching machinery. Arms a
-   * `session.on("data", …)` listener BEFORE sending the GET (same ordering as {@link p2pQuery}); the
-   * `cleanup`/`onData`/`timer` are hoisted out of the Promise executor so the try/catch can tear the
-   * listener down if the send itself throws (without it a send failure would leak `onData` on the
-   * long-lived shared session for the full timeout window). Matches the reply by inner
-   * `cmd === CMD_TRANSFER_PAYLOAD` AND `payload.time` (a hex string live) equal to the GET's own
-   * keyTime. Throws if no matching reply arrives within {@link FF09_SETTINGS_GET_TIMEOUT_MS}.
+   * Send one `ff09` frame and wait for the device's reply to it — the step behind the settings GET
+   * ({@link sendFf09Autolock} reads to preserve A7/A8 across a write, {@link getAutoLockState} reads for
+   * its own sake) and {@link exchangeFf09}, so they cannot drift on the arm-before-send / listener-leak /
+   * matching machinery. Arms a `session.on("data", …)` listener BEFORE sending (same ordering as
+   * {@link p2pQuery}); the `cleanup`/`onData`/`timer` are hoisted out of the Promise executor so the
+   * try/catch can tear the listener down if the send itself throws (without it a send failure would leak
+   * `onData` on the long-lived shared session for the full timeout window). A reply is a frame whose inner
+   * `cmd` is `CMD_TRANSFER_PAYLOAD`, whose `payload.time` (a hex string live) is the request's keyTime and
+   * whose `ff09` frame carries the request's opcode; a lock's state report echoes the `time` under another
+   * opcode. Throws if no matching reply arrives within {@link FF09_SETTINGS_GET_TIMEOUT_MS}; `what` names
+   * the request in that error.
    */
-  private async fetchFf09SettingsGetReply(
+  private async awaitFf09Reply(
     sn: string,
-    cmd: { adminUserId: string; deviceSn: string },
+    frame: Ff09Frame,
     resolved: ResolvedSession,
+    what: string,
   ): Promise<{ lockPayload: string; keyTime: number }> {
     const { session } = resolved;
-    const query = buildFf09QueryFrame({ adminUserId: cmd.adminUserId, deviceSn: cmd.deviceSn });
+    const code = ff09FrameCode(frame.lockPayload);
     let onData!: (f: P2PFrame) => void;
     let timer!: ReturnType<typeof setTimeout>;
     const cleanup = (): void => {
       clearTimeout(timer);
       session.off("data", onData);
     };
-    const getReplyPromise = new Promise<{ lockPayload: string; keyTime: number } | undefined>((resolve) => {
+    const replyPromise = new Promise<{ lockPayload: string; keyTime: number } | undefined>((resolve) => {
       onData = (f: P2PFrame): void => {
         const j = f.json as { cmd?: number; payload?: Record<string, unknown> } | undefined;
         if (j?.cmd !== CMD_TRANSFER_PAYLOAD || !j.payload) return;
@@ -2263,7 +2271,8 @@ export class P2PCommandRouter {
         const lockPayload = j.payload.lock_payload;
         if (typeof lockPayload !== "string" || (typeof rawTime !== "string" && typeof rawTime !== "number")) return;
         const keyTime = ff09ReplyKeyTime(rawTime);
-        if (keyTime === undefined || keyTime !== query.time) return; // other traffic — keep waiting
+        if (keyTime === undefined || keyTime !== frame.time) return; // other traffic — keep waiting
+        if (ff09FrameCode(lockPayload) !== code) return;
         cleanup();
         resolve({ lockPayload, keyTime });
       };
@@ -2277,7 +2286,7 @@ export class P2PCommandRouter {
       await this.sendSetPayloadEnvelope(
         sn,
         CMD_TRANSFER_PAYLOAD,
-        ff09TransferPayload(query),
+        ff09TransferPayload(frame),
         resolved.channel,
         0,
         resolved,
@@ -2286,19 +2295,39 @@ export class P2PCommandRouter {
       cleanup();
       throw e;
     }
-    const getReply = await getReplyPromise;
-    if (!getReply) {
+    const reply = await replyPromise;
+    if (!reply) {
       throw new Error(
-        `fetchFf09SettingsGetReply(${sn}): no settings GET reply within ` +
-          `${P2PCommandRouter.FF09_SETTINGS_GET_TIMEOUT_MS}ms.`,
+        `awaitFf09Reply(${sn}): no ${what} reply within ${P2PCommandRouter.FF09_SETTINGS_GET_TIMEOUT_MS}ms.`,
       );
     }
-    return getReply;
+    return reply;
+  }
+
+  /**
+   * **One `ff09` command and its reply over P2P** — the `Ff09SettingsReader.exchange` implementation.
+   * Builds the frame ({@link buildFf09CommandFrame}: `[A1 time][A2 adminUserId]` + `fields`), sends it on
+   * the device's session and waits for the reply matched by keyTime and opcode ({@link awaitFf09Reply}),
+   * and answers it decrypted. Forwards the opcode, `apiCommand` and fields opaquely; a refusal status
+   * resolves. Takes the session's clear fallback, so a standalone device of a
+   * model in {@link CLEAR_FF09_MODELS} whose station refuses level-2 gets the frame in the clear.
+   */
+  async exchangeFf09(sn: string, req: Ff09CommandFrameInput): Promise<Ff09Reply> {
+    const resolved = await this.resolveSession(sn, { waitLevel2: true, clearFallback: true });
+    const reply = await this.awaitFf09Reply(
+      sn,
+      buildFf09CommandFrame(req),
+      resolved,
+      `ff09 0x${req.commandCode.toString(16)}`,
+    );
+    return parseFf09SettingsResponse(
+      decryptFf09Frame({ ...reply, adminUserId: req.adminUserId, deviceSn: req.deviceSn }),
+    );
   }
 
   /**
    * **Read the T8531's current auto-lock settings over P2P** — the `Ff09SettingsReader` behind
-   * `dev.lock()?.getAutoLockState()`. A pure GET, no SET: reuses {@link fetchFf09SettingsGetReply} (the
+   * `dev.lock()?.getAutoLockState()`. A pure GET, no SET: reuses {@link awaitFf09Reply} (the
    * same GET step {@link sendFf09Autolock} runs internally to preserve A7/A8), then decrypts + decodes
    * fields `a1`-`a5` per `transport/ff09.ts`'s response tag map (`a1`=enabled, `a2`=delaySeconds,
    * `a3`=isSchedule, `a4`/`a5`=schedule start/end as raw `[hour,minute]` byte pairs — see
@@ -2308,7 +2337,7 @@ export class P2PCommandRouter {
    */
   async getAutoLockState(sn: string, cmd: { adminUserId: string; deviceSn: string }): Promise<AutoLockSnapshot> {
     const resolved = await this.resolveSession(sn, { waitLevel2: true });
-    const getReply = await this.fetchFf09SettingsGetReply(sn, cmd, resolved);
+    const getReply = await this.awaitFf09Reply(sn, buildFf09QueryFrame(cmd), resolved, "settings GET");
     return decodeFf09AutoLockSnapshot(
       parseFf09SettingsResponse(
         decryptFf09Frame({

@@ -36,6 +36,9 @@ const s3: CommandContext = {
   hasP2p: true,
 };
 
+/** The Smart Lock C220, which takes the same frame over its own P2P session. */
+const c220: CommandContext = { ...c33, deviceType: 184, model: "T8506", serial: "T8506K0000000000", hasP2p: true };
+
 /** A video smart lock on another wire family; the passcode frame is unconfirmed there. */
 const videoLock: CommandContext = { ...c33, deviceType: 189, model: "T8531", serial: "T8531K0000000000" };
 
@@ -70,7 +73,7 @@ function fakes(answer: Ff09Reply = reply(0, [[0xa1, "0007"]])) {
 const lockOf = (ctx: CommandContext, deps: { users?: DeviceUserDirectory; ff09Settings?: Ff09SettingsReader }) =>
   bind<LockActions>("lock", ctx, { deviceUsers: deps.users, ff09Settings: deps.ff09Settings }).acts;
 
-describe("lock.addPasscode — Smart Lock C33, C30 and FamiLock S3", () => {
+describe("lock.addPasscode — Smart Lock C33, C30, C220 and FamiLock S3", () => {
   it("creates the cloud user, sends the lock the permanent code under its short id, then records the password", async () => {
     const { users, ff09Settings, calls } = fakes();
 
@@ -407,13 +410,14 @@ describe("lock.addPasscode — Smart Lock C33, C30 and FamiLock S3", () => {
     }
   });
 
-  it("is present on the C33, C30 and S3, absent off them, and without either provider or the exchange", () => {
+  it("is present on the C33, C30, C220 and S3, absent off them, and without either provider or the exchange", () => {
     const { users, ff09Settings } = fakes();
     const { exchange: _dropped, ...noExchange } = ff09Settings;
 
     expect("addPasscode" in lockOf(c33, { users, ff09Settings })).toBe(true);
     expect("addPasscode" in lockOf(c30, { users, ff09Settings })).toBe(true);
     expect("addPasscode" in lockOf(s3, { users, ff09Settings })).toBe(true);
+    expect("addPasscode" in lockOf(c220, { users, ff09Settings })).toBe(true);
     expect("addPasscode" in lockOf(videoLock, { users, ff09Settings })).toBe(false);
     expect("addPasscode" in lockOf(c33, { ff09Settings })).toBe(false);
     expect("addPasscode" in lockOf(c33, { users })).toBe(false);
@@ -455,7 +459,7 @@ describe("lock.changePasscode", () => {
   it("is present where addPasscode is, and absent off those models", () => {
     const { users, ff09Settings } = fakes();
 
-    for (const ctx of [c33, c30, s3]) {
+    for (const ctx of [c33, c30, s3, c220]) {
       expect("changePasscode" in lockOf(ctx, { users, ff09Settings })).toBe(true);
     }
     expect("changePasscode" in lockOf(videoLock, { users, ff09Settings })).toBe(false);
@@ -495,7 +499,7 @@ describe("lock.deleteUser", () => {
   it("is present where addPasscode is, and absent off those models", () => {
     const { users, ff09Settings } = fakes();
 
-    for (const ctx of [c33, c30, s3]) expect("deleteUser" in lockOf(ctx, { users, ff09Settings })).toBe(true);
+    for (const ctx of [c33, c30, s3, c220]) expect("deleteUser" in lockOf(ctx, { users, ff09Settings })).toBe(true);
     expect("deleteUser" in lockOf(videoLock, { users, ff09Settings })).toBe(false);
     expect("deleteUser" in lockOf(c33, { ff09Settings })).toBe(false);
   });

@@ -1,4 +1,11 @@
-import { isClassicWifiLock, isFamiLockS3, isSmartLockC30, isSmartLockC33, isVideoSmartLock } from "../device-family.js";
+import {
+  isClassicWifiLock,
+  isFamiLockS3,
+  isSmartLockC220,
+  isSmartLockC30,
+  isSmartLockC33,
+  isVideoSmartLock,
+} from "../device-family.js";
 import { asBool } from "../../core/util.js";
 import { posixWallClockToEpoch, type WallClockTime } from "../../core/posix-tz.js";
 import { WEEKDAYS, type Weekday } from "../weekdays.js";
@@ -167,16 +174,16 @@ function nativeReport(signal: InboundSignal): Record<string, unknown> | undefine
 /**
  * The keypad-user wire on the Smart Lock C33, C30 and FamiLock S3, as the vendor app drives it: the `ff09`
  * opcodes that add a code, change it and delete a user, and the envelope `apiCommand` the app sends every
- * command to these locks under.
+ * command to these locks under, which the Smart Lock C220 takes too.
  */
 const PASSCODE_WIRE = { ADD: 0x24, CHANGE: 0x26, DELETE_USER: 0x2d, API_COMMAND: 6012 } as const;
 
 /** The most bytes one field of an `ff09` frame carries: a field's length is a single byte. */
 const MAX_FIELD_BYTES = 0xff;
 
-/** The models whose keypad users are added and deleted here: Smart Lock C33, C30 and FamiLock S3. */
+/** The models whose keypad users are added and deleted here: Smart Lock C33, C30, C220 and FamiLock S3. */
 const keepsKeypadUsers = (ctx: CommandContext): boolean =>
-  isSmartLockC33(ctx) || isSmartLockC30(ctx) || isFamiLockS3(ctx);
+  isSmartLockC33(ctx) || isSmartLockC30(ctx) || isSmartLockC220(ctx) || isFamiLockS3(ctx);
 
 /**
  * When a keypad code admits its holder, on the lock's own clock; a code added without one is permanent.
@@ -358,10 +365,10 @@ interface ScheduleSource {
 const hhmm = (t: WallClockTime) => `${String(t.hour).padStart(2, "0")}:${String(t.minute).padStart(2, "0")}`;
 
 /**
- * A code's schedule as the cloud record of a Smart Lock C33 or C30 stores it, as the app records it. A
- * dated code carries its first day's midnight and its last day's last second as instants on the lock's
- * clock `tz`, and one time period: a Time Span's `periodic` 255 and its two times as `HH:MM`, a Repeated
- * Entry's frame weekday byte and `0:0` to `-1:-1`. A permanent or OneTime code carries
+ * A code's schedule as the cloud record of a Smart Lock C33, C30 or C220 stores it, as the app records
+ * it. A dated code carries its first day's midnight and its last day's last second as instants on the
+ * lock's clock `tz`, and one time period: a Time Span's `periodic` 255 and its two times as `HH:MM`, a
+ * Repeated Entry's frame weekday byte and `0:0` to `-1:-1`. A permanent or OneTime code carries
  * {@link UNBOUNDED_SCHEDULE}. Throws on a lock clock `tz` this cannot evaluate.
  */
 function smartLockSchedule({ window, validity, tz }: ScheduleSource): string {
@@ -403,7 +410,7 @@ interface PasscodeDialect {
   oneTime(tz: string | undefined): PasscodeWindow;
 }
 
-/** The Smart Lock C33's spelling, which the C30 shares. */
+/** The Smart Lock C33's spelling, which the C30 and C220 share. */
 const SMART_LOCK_DIALECT: PasscodeDialect = { schedule: smartLockSchedule, oneTime: () => ONE_TIME_WINDOW };
 
 /**
@@ -439,7 +446,7 @@ function windowOf(
  * The fields of the add-passcode frame after its time and account id (`A3`…`AD`): the code as ASCII
  * digits, the window's user type, dates, weekdays, times and single-use field, the name, the user's short
  * id as two bytes, and the window's validity. Byte-for-byte the frame the app sends to add a code to a
- * C33, a C30 or an S3.
+ * C33, a C30 or an S3, which a C220 accepts as well.
  */
 function passcodeFields(passcode: string, name: string, shortUserId: string, window: PasscodeWindow): Buffer[] {
   return [
@@ -815,8 +822,8 @@ export const LOCK_MEMBERS = {
   /**
    * Add a keypad code for a new user named `name` (see {@link addPasscode}): permanent, or as `validity`
    * says — a time span, repeated entry on chosen weekdays, or once. Answers the user's short id and the
-   * code's password id, both as the 4-hex-digit strings the cloud's user list carries. Smart Lock C33, C30
-   * and FamiLock S3, each kind confirmed on all three.
+   * code's password id, both as the 4-hex-digit strings the cloud's user list carries. Smart Lock C33, C30,
+   * C220 and FamiLock S3, each kind confirmed on all four.
    */
   addPasscode: provided(
     "deviceUsers",
@@ -831,7 +838,7 @@ export const LOCK_MEMBERS = {
 
   /**
    * Change the code of the keypad user `shortUserId` (see {@link changePasscode}) to `passcode`, keeping
-   * its schedule. Smart Lock C33, C30 and FamiLock S3, confirmed on each.
+   * its schedule. Smart Lock C33, C30, C220 and FamiLock S3, confirmed on each.
    */
   changePasscode: provided(
     "deviceUsers",
@@ -845,7 +852,7 @@ export const LOCK_MEMBERS = {
   /**
    * Delete the keypad user `shortUserId` (see {@link deleteUser}) from the lock and the cloud, with every
    * code stored under it. `shortUserId` is the 4-hex-digit id {@link addPasscode} answers and the cloud's
-   * user list carries. Smart Lock C33, C30 and FamiLock S3, confirmed on each.
+   * user list carries. Smart Lock C33, C30, C220 and FamiLock S3, confirmed on each.
    */
   deleteUser: provided(
     "deviceUsers",

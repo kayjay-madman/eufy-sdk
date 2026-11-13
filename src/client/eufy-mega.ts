@@ -15,7 +15,12 @@
  */
 import { EventEmitter } from "node:events";
 import { MegaHttpClient, LoginStatus, SessionExpiredError, type LoginResult } from "../transport/http/mega-client.js";
-import { SecureMqtt, isNotAuthorized, type SecureMqttCredentials } from "../transport/mqtt/secure-mqtt.js";
+import {
+  DeviceTopicsDeniedError,
+  SecureMqtt,
+  isNotAuthorized,
+  type SecureMqttCredentials,
+} from "../transport/mqtt/secure-mqtt.js";
 import { mqttAppName, mqttScopeFor, type MqttScope } from "../transport/mqtt/topics.js";
 import { buildAppShapedClientId, mqttUuidFrom } from "../transport/mqtt/app-client-id.js";
 import { parseStateInfoSignal } from "../transport/mqtt/availability.js";
@@ -26,6 +31,7 @@ import { decodeMapFrame } from "./map-channels.js";
 import { VacuumMapStore } from "../model/index.js";
 import { type P2PSession, type P2PFrame } from "../transport/p2p/p2p-session.js";
 import { P2PCommandRouter } from "../transport/p2p/command-router.js";
+import type { Ff09CommandFrameInput } from "../transport/ff09.js";
 import { RtcCommandRouter, type RtcRoute } from "../transport/rtc/command-router.js";
 import { jpegGeometry } from "../transport/p2p/media.js";
 import type { PowerTier } from "../transport/p2p/session-manager.js";
@@ -56,6 +62,7 @@ import {
   type Command,
   type CommandObservation,
   type CommandSink,
+  type Ff09Reply,
   type Ff09SettingsReader,
   type DeviceUserDirectory,
   type MediaProvider,
@@ -1541,9 +1548,10 @@ export class EufyMega extends EventEmitter {
    * It earns its own boundary because `GET_SETTINGS` is a request/reply query that neither
    * `CommandSink` (write-only) nor `MediaProvider.p2pQuery` (P2P-only, no decrypt) fits. `exchange` goes
    * over secure MQTT, the wire the vendor app sends these commands on, including to a lock with a P2P
-   * endpoint. Named for the frame family rather than the capability, so this facade stays
-   * capability-neutral like the layers below it — see `CapabilityModule.actions`'s doc before adding
-   * another.
+   * endpoint; where the security cluster denies every topic of the device, as it does a Smart Lock C220's,
+   * it goes over the device's own P2P session, which the C220 answers. Named for the frame family rather
+   * than the capability, so this facade stays capability-neutral like the layers below it — see
+   * `CapabilityModule.actions`'s doc before adding another.
    */
   private ff09SettingsReaderFor(sn: string, ctx: CommandContext): Ff09SettingsReader | undefined {
     if (!ctx.adminUserId) return undefined;
@@ -1555,8 +1563,21 @@ export class EufyMega extends EventEmitter {
           ? this.p2p.getAutoLockState(sn, { adminUserId, deviceSn })
           : this.mqtt.getAutoLockState(sn, { adminUserId, deviceSn }),
       exchange: (commandCode, apiCommand, fields) =>
-        this.mqtt.exchangeFf09(sn, { adminUserId, deviceSn, commandCode, apiCommand, fields }),
+        this.exchangeFf09(sn, ctx, { adminUserId, deviceSn, commandCode, apiCommand, fields }),
     };
+  }
+
+  /**
+   * One `ff09` command and its reply: over secure MQTT, and over the device's own P2P session when the
+   * security cluster denies every topic of a device that has one. Any other failure rejects as it is.
+   */
+  private async exchangeFf09(sn: string, ctx: CommandContext, req: Ff09CommandFrameInput): Promise<Ff09Reply> {
+    try {
+      return await this.mqtt.exchangeFf09(sn, req);
+    } catch (e) {
+      if (ctx.hasP2p && e instanceof DeviceTopicsDeniedError) return this.p2p.exchangeFf09(sn, req);
+      throw e;
+    }
   }
 
   /**

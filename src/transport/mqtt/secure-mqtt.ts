@@ -108,6 +108,25 @@ export interface SecureMqttOptions {
 }
 
 /**
+ * The broker denied every topic of a device on this credential scope: nothing addressed to the device can
+ * be published or answered on this cluster. Raised when every topic of a subscription is refused, and
+ * when every probed instance of a cluster refuses the device's topic.
+ */
+export class DeviceTopicsDeniedError extends Error {
+  constructor(
+    /** The device whose topics were denied. */
+    readonly deviceSn: string,
+    /** The credential scope (app name) the subscription was made under. */
+    readonly scope: string,
+    /** The denied topic filters. */
+    readonly topics: readonly string[],
+  ) {
+    super(`subscribe ${deviceSn}: every topic denied on credential scope "${scope}" (${topics.join(", ")})`);
+    this.name = "DeviceTopicsDeniedError";
+  }
+}
+
+/**
  * The broker client. Internal transport; a host reaches appliances through the capability surface.
  * @internal
  */
@@ -237,12 +256,7 @@ export class SecureMqtt extends EventEmitter implements RealtimeTransport {
     const topics = [...subscribeTopics(device)];
     const { denied } = await this.subscribeEach(topics);
     const scope = this.o.credentials.app_name ?? "default";
-    if (denied.length === topics.length) {
-      throw new Error(
-        `subscribe ${device.sn}: every topic denied on credential scope "${scope}" — ` +
-          `this line's topics are granted to a different scope (${denied.join(", ")})`,
-      );
-    }
+    if (denied.length === topics.length) throw new DeviceTopicsDeniedError(device.sn, scope, denied);
     for (const topic of denied) {
       this.emit("error", new Error(`subscribe ${device.sn}: "${topic}" denied on credential scope "${scope}"`));
     }

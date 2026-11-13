@@ -5,9 +5,9 @@ import type { EufyDevice } from "../../../core/types.js";
  * `MqttCommandRouter.ensureSecurityMqttFor` — the broker-instance probe. A lock's session lives on the
  * region's `security-mqtt-*` cluster, not the `aiot-mqtt-*` endpoint the credential names, so the router
  * probes that cluster's instances with a SUBSCRIBE-only connection and pins the real connection to the
- * first that grants. A device the security cluster refuses outright is not on it, and is probed on the
- * `aiot` endpoint instead. A device no instance grants is reported rather than connected to a broker that
- * will never route to it.
+ * first that grants. A device the security cluster refuses outright is not on it: one with no other wire
+ * is probed on the `aiot` endpoint instead, one with a P2P endpoint is reported as denied. A device no
+ * instance grants is reported rather than connected to a broker that will never route to it.
  *
  * The account's own credentials are the ONLY credentials used — there is no cert override, so the
  * router does no filesystem access at all. `discoverReachableInstance` and `SecureMqtt` are mocked (no
@@ -30,6 +30,7 @@ vi.mock("../secure-mqtt.js", async () => {
   const actual = await vi.importActual<typeof import("../secure-mqtt.js")>("../secure-mqtt.js");
   return {
     SecureMqtt: FakeSecureMqtt,
+    DeviceTopicsDeniedError: actual.DeviceTopicsDeniedError,
     isSubackFailure: actual.isSubackFailure,
     secureTopic: (d: EufyDevice, leg: string = "res") => `cmd/${d.category}/${d.model}/${d.sn}/${leg}`,
   };
@@ -37,6 +38,7 @@ vi.mock("../secure-mqtt.js", async () => {
 
 const { MqttCommandRouter } = await import("../command-router.js");
 const { mqttUuidFrom } = await import("../app-client-id.js");
+const { DeviceTopicsDeniedError } = await import("../secure-mqtt.js");
 
 const DEV = { sn: "T85D0K0000000000", category: "eufy_security", model: "T85D0" } as unknown as EufyDevice;
 
@@ -161,6 +163,21 @@ describe("MqttCommandRouter.ensureSecurityMqttFor — broker-instance probe", ()
     expect(probed.hostname).toBe("aiot-mqtt-us.anker.com");
     expect(opts.candidateIps).toContain("3.139.229.186");
     expect(lastConstructedWith.credentials.endpoint_addr).toBe("aiot-mqtt-us.anker.com");
+  });
+
+  it("reports a device with a P2P endpoint the security cluster refuses as denied there, without the aiot probe", async () => {
+    discoverReachableInstance.mockResolvedValueOnce(suback80());
+    const withP2p = { ...DEV, p2pDid: "XXXXXXX-000000-XXXXX" } as EufyDevice;
+
+    const err = await (makeRouter() as any).ensureSecurityMqttFor(withP2p).catch((e: Error) => e);
+
+    expect(discoverReachableInstance).toHaveBeenCalledTimes(1);
+    expect(err).toBeInstanceOf(DeviceTopicsDeniedError);
+    expect(err).toMatchObject({
+      deviceSn: DEV.sn,
+      scope: "eufy_security",
+      topics: [`cmd/eufy_security/T85D0/${DEV.sn}/res`],
+    });
   });
 
   it("names each candidate's reason when none grants, a SUBACK deny code included", async () => {

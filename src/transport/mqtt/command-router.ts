@@ -45,7 +45,7 @@ import {
   type Ff09FrameInput,
   type Ff09TransferPayload,
 } from "../ff09.js";
-import { SecureMqtt, isSubackFailure, type SecureMqttCredentials } from "./secure-mqtt.js";
+import { DeviceTopicsDeniedError, SecureMqtt, isSubackFailure, type SecureMqttCredentials } from "./secure-mqtt.js";
 import { secureTopic } from "./topics.js";
 import { buildAppShapedClientId, mqttUuidFrom } from "./app-client-id.js";
 import { discoverReachableInstance } from "./broker-discovery.js";
@@ -379,9 +379,10 @@ export class MqttCommandRouter {
    * certificate, so the account's credentials and TLS checks carry over unchanged.
    *
    * The security cluster refuses the topic of a device whose session is not there (every instance
-   * answers a C220's with a SUBACK deny). Such a device is probed on the `aiot` endpoint instead, with
-   * {@link KNOWN_AIOT_BROKER_IPS}, where an unlock of a T85D0 has been answered, as is any device when the
-   * security host resolves to no instance.
+   * answers a C220's with a SUBACK deny). Such a device with a P2P endpoint rejects with
+   * {@link DeviceTopicsDeniedError}, for the facade to take that endpoint; one with no other wire is
+   * probed on the `aiot` endpoint instead, with {@link KNOWN_AIOT_BROKER_IPS}, where an unlock of a T85D0
+   * has been answered — as is any device when the security host resolves to no instance.
    *
    * Which cert is used does NOT change the outcome — the account's own `get_user_mqtt_info` cert and a
    * cert extracted from a real phone's keystore produce the identical grant/deny pattern across every
@@ -423,6 +424,9 @@ export class MqttCommandRouter {
       );
     let results = await probe(creds);
     const refused = results.length > 0 && results.every((r) => isSubackFailure(r.grantedQos));
+    if (refused && typeof dev.p2pDid === "string" && dev.p2pDid.length > 0) {
+      throw new DeviceTopicsDeniedError(dev.sn, "eufy_security", [secureTopic(dev, "res")]);
+    }
     if (refused || results.length === 0) {
       creds = account;
       results = await probe(account, MqttCommandRouter.KNOWN_AIOT_BROKER_IPS);
