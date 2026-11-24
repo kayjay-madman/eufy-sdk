@@ -119,14 +119,37 @@ describe("lock.addPasscode — Smart Lock C33, C30, C220 and FamiLock S3", () =>
     expect(users.savePassword).not.toHaveBeenCalled();
   });
 
-  it("names the cloud user it leaves when the lock does not answer", async () => {
-    const { users, ff09Settings } = fakes();
-    vi.mocked(ff09Settings.exchange!).mockRejectedValueOnce(new Error("no reply"));
+  it("reads an add the lock did not answer back under the short id, and says what it may hold", async () => {
+    const lost = (readBack: () => Promise<Ff09Reply>) => {
+      const f = fakes();
+      vi.mocked(f.ff09Settings.exchange!).mockImplementation(async (code: number) => {
+        f.calls.push("exchange");
+        if (code === 0x24) throw new Error("no reply");
+        return readBack();
+      });
+      return f;
+    };
 
-    await expect(lockOf(c33, { users, ff09Settings }).addPasscode!("Guest", "13572468")).rejects.toThrow(
-      "no reply (cloud user 0007 remains)",
+    const stored = lost(async () => reply(0, [[0xa1, Buffer.from("13572468").toString("hex")]]));
+    await expect(lockOf(c33, stored).addPasscode!("Guest", "13572468")).resolves.toEqual({
+      shortUserId: "0007",
+      passwordId: "0007",
+    });
+    expect(vi.mocked(stored.ff09Settings.exchange!).mock.calls[1]).toEqual([0x27, 6012, [Buffer.from("0007", "hex")]]);
+    expect(stored.calls).toEqual(["addUser", "exchange", "exchange", "savePassword"]);
+
+    const empty = lost(async () => reply(1));
+    await expect(lockOf(c33, empty).addPasscode!("Guest", "13572468")).rejects.toThrow(
+      "no reply; the lock holds no such code under 0007 (cloud user 0007 remains)",
     );
-    expect(users.deleteUser).not.toHaveBeenCalled();
+    const silent = lost(() => Promise.reject(new Error("no read-back")));
+    await expect(lockOf(c33, silent).addPasscode!("Guest", "13572468")).rejects.toThrow(
+      "the lock may hold it under 0007, answering no read-back (cloud user 0007 remains)",
+    );
+    for (const f of [empty, silent]) {
+      expect(f.users.savePassword).not.toHaveBeenCalled();
+      expect(f.users.deleteUser).not.toHaveBeenCalled();
+    }
   });
 
   it("names the stored code when the cloud does not record it", async () => {

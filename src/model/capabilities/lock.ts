@@ -200,7 +200,7 @@ function nativeReport(signal: InboundSignal): Record<string, unknown> | undefine
  * opcodes that add a code, change it and delete a user, and the envelope `apiCommand` the app sends every
  * command to these locks under, which the Smart Lock C220 takes too.
  */
-const PASSCODE_WIRE = { ADD: 0x24, CHANGE: 0x26, DELETE_USER: 0x2d, API_COMMAND: 6012 } as const;
+const PASSCODE_WIRE = { ADD: 0x24, CHANGE: 0x26, QUERY: 0x27, DELETE_USER: 0x2d, API_COMMAND: 6012 } as const;
 
 /** The most bytes one field of an `ff09` frame carries: a field's length is a single byte. */
 const MAX_FIELD_BYTES = 0xff;
@@ -535,10 +535,13 @@ function checkKeypadUser(method: string, lock: KeypadLock, shortUserId: string):
  * app records it) and its schedule under the user in the cloud, which lists the user with no password
  * until it is.
  *
+ * An add the lock does not answer in time is read back (QUERY_PW) under the short id, the password id the lock
+ * answers an add with: the code there completes the add.
+ *
  * A code, name or window that cannot be sent rejects before anything is sent. Any later failure rejects
- * naming the cloud user created for it, and the code's password id once the lock has stored it. A lock
- * refusal leaves that user in the cloud holding no code, as the app leaves it (a lock refuses a passcode
- * it already holds with status `17`).
+ * naming the cloud user created for it, what the lock may hold, and the code's password id once the lock has
+ * stored it. A lock refusal leaves that user in the cloud holding no code, as the app leaves it (a lock
+ * refuses a passcode it already holds with status `17`).
  */
 async function addPasscode(
   lock: KeypadLock,
@@ -553,19 +556,29 @@ async function addPasscode(
   const window = windowOf(validity, lock.tz, lock.dialect);
   const schedule = lock.dialect.schedule({ window, validity, tz: lock.tz });
   const { shortUserId } = await lock.users.addUser(name);
-  const reply = await lock
+  const remains = `cloud user ${shortUserId} remains`;
+  const passwordId = await lock
     .exchange(PASSCODE_WIRE.ADD, PASSCODE_WIRE.API_COMMAND, passcodeFields(passcode, name, shortUserId, window))
-    .catch((e: Error) => {
-      throw new Error(`lock.addPasscode: ${e.message} (cloud user ${shortUserId} remains)`, { cause: e });
-    });
-  if (reply.status !== 0) {
-    throw new Error(`lock.addPasscode: device result ${reply.status} (cloud user ${shortUserId} remains)`);
-  }
-  const passwordId = reply.fields.get(0xa1);
-  if (passwordId?.length !== 2) {
-    throw new Error(`lock.addPasscode: the lock's reply carries no password id (cloud user ${shortUserId} remains)`);
-  }
-  const added = { shortUserId, passwordId: passwordId.toString("hex").toUpperCase() };
+    .then(
+      (reply) => {
+        if (reply.status !== 0) throw new Error(`lock.addPasscode: device result ${reply.status} (${remains})`);
+        const id = reply.fields.get(0xa1);
+        if (id?.length !== 2) throw new Error(`lock.addPasscode: the lock's reply carries no password id (${remains})`);
+        return id.toString("hex").toUpperCase();
+      },
+      async (e: Error) => {
+        const held = await lock
+          .exchange(PASSCODE_WIRE.QUERY, PASSCODE_WIRE.API_COMMAND, [Buffer.from(shortUserId, "hex")])
+          .catch(() => undefined);
+        if (held?.status === 0 && held.fields.get(0xa1)?.toString("ascii") === passcode)
+          return shortUserId.toUpperCase();
+        const state = held
+          ? `holds no such code under ${shortUserId}`
+          : `may hold it under ${shortUserId}, answering no read-back`;
+        throw new Error(`lock.addPasscode: ${e.message}; the lock ${state} (${remains})`, { cause: e });
+      },
+    );
+  const added = { shortUserId, passwordId };
   await lock.users
     .savePassword(shortUserId, { passwordId: added.passwordId, passwordType: 1, schedule })
     .catch((e: Error) => {
